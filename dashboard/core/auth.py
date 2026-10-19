@@ -55,7 +55,7 @@ def load_auth_config() -> AuthConfig:
         supabase_service_role_key=os.environ.get("SUPABASE_SERVICE_ROLE_KEY", ""),
         admin_passcode=os.environ.get("ADMIN_PASSCODE", "admin777"),
         allow_offline=True,
-        github_repo=os.environ.get("GITHUB_REPO", ""),
+        github_repo=os.environ.get("GITHUB_REPO", "vladyslav-kalashnikov/OrderDesk"),
     )
     if not cfg_path.exists():
         save_auth_config(defaults)
