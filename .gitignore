@@ -1,0 +1,20 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Local database, sessions, tokens, logs
+data/
+*.log
+
+# Backups and archives
+*.orig
+*.v2
+*.zip
+*.tgz
+
+# OS / IDE
+.DS_Store
+.claude/
+Claude outputs/

@@ -1,0 +1,78 @@
+#!/bin/bash
+set -e
+
+# Визначаємо шлях до кореневої папки проекту
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/../../.." && pwd )"
+cd "$DIR"
+
+mkdir -p "$DIR/data"
+LOG_FILE="$DIR/data/app_launcher.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "=== Запуск OrderDesk: $(date) ==="
+
+notify() {
+    osascript -e "display notification \"$1\" with title \"OrderDesk\"" 2>/dev/null || true
+}
+
+alert() {
+    osascript -e "display alert \"OrderDesk\" message \"$1\" as critical" 2>/dev/null || true
+}
+
+VENV_PY="$DIR/venv/bin/python"
+
+# Якщо віртуальне середовище ще не створено (перший запуск після завантаження з git)
+if [ ! -f "$VENV_PY" ]; then
+    echo "Шукаємо системний Python 3..."
+    SYSTEM_PY=""
+    for candidate in python3 /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            SYSTEM_PY="$(command -v "$candidate")"
+            break
+        fi
+    done
+
+    if [ -z "$SYSTEM_PY" ]; then
+        alert "На цьому Mac не знайдено Python 3. Будь ласка, встановіть Python з python.org або запустіть команду xcode-select --install."
+        exit 1
+    fi
+
+    notify "Перший запуск: створюємо віртуальне середовище venv..."
+    echo "Використовуємо: $SYSTEM_PY"
+    "$SYSTEM_PY" -m venv "$DIR/venv"
+    "$VENV_PY" -m pip install --upgrade pip
+
+    if [ -f "$DIR/requirements.txt" ]; then
+        notify "Встановлюємо бібліотеки (це займе 1-2 хвилини)..."
+        "$VENV_PY" -m pip install -r "$DIR/requirements.txt"
+    fi
+    notify "Налаштування завершено! Запускаємо OrderDesk..."
+fi
+
+# -----------------------------------------------------------------------------
+# Автооновлення з репозиторію Git (якщо проект клоновано з гіта)
+# -----------------------------------------------------------------------------
+if [ -d "$DIR/.git" ] && command -v git >/dev/null 2>&1; then
+    echo "Перевірка оновлень з репозиторію Git..."
+    if git -C "$DIR" fetch --quiet origin 2>/dev/null; then
+        LOCAL_HASH=$(git -C "$DIR" rev-parse HEAD 2>/dev/null || echo "")
+        REMOTE_HASH=$(git -C "$DIR" rev-parse @{u} 2>/dev/null || echo "")
+        if [ -n "$LOCAL_HASH" ] && [ -n "$REMOTE_HASH" ] && [ "$LOCAL_HASH" != "$REMOTE_HASH" ]; then
+            notify "Знайдено оновлення коду! Завантажуємо свіжу версію..."
+            echo "Оновлення з $LOCAL_HASH на $REMOTE_HASH..."
+            if git -C "$DIR" pull --quiet --ff-only 2>/dev/null; then
+                notify "OrderDesk успішно оновлено до останньої версії!"
+                if git -C "$DIR" diff --name-only "$LOCAL_HASH" "$REMOTE_HASH" 2>/dev/null | grep -q "requirements.txt"; then
+                    echo "Оновлення бібліотек..."
+                    "$VENV_PY" -m pip install -q -r "$DIR/requirements.txt" 2>/dev/null || true
+                fi
+            fi
+        else
+            echo "Код актуальний (остання версія)."
+        fi
+    fi
+fi
+
+export ORDERDESK_DATA="$DIR/data"
+echo "Запуск інтерфейсу через: $VENV_PY"
+exec "$VENV_PY" -m dashboard "$@"
