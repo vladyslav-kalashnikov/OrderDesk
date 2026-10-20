@@ -103,7 +103,7 @@ class UpdateManager:
 
                 for member in z.infolist():
                     rel_path = member.filename[len(prefix):]
-                    # Захист: ніколи не перезаписуємо дані клієнта, базу даних або venv!
+                    # Захист: ніколи не перезаписуємо дані клієнта, базу даних, venv або запущений .bat файл!
                     if (
                         not rel_path
                         or rel_path.startswith("data/")
@@ -111,6 +111,7 @@ class UpdateManager:
                         or rel_path.startswith(".git/")
                         or rel_path.endswith(".db")
                         or rel_path.endswith(".log")
+                        or rel_path.endswith(".bat")
                     ):
                         continue
 
@@ -118,9 +119,12 @@ class UpdateManager:
                     if member.is_dir():
                         target_file.mkdir(parents=True, exist_ok=True)
                     else:
-                        target_file.parent.mkdir(parents=True, exist_ok=True)
-                        with z.open(member) as src, open(target_file, "wb") as dst:
-                            shutil.copyfileobj(src, dst)
+                        try:
+                            target_file.parent.mkdir(parents=True, exist_ok=True)
+                            with z.open(member) as src, open(target_file, "wb") as dst:
+                                shutil.copyfileobj(src, dst)
+                        except (PermissionError, OSError):
+                            continue
 
             if remote_sha:
                 self.save_local_commit(remote_sha)

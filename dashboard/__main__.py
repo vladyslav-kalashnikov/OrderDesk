@@ -76,9 +76,13 @@ def main() -> int:
         engine.start()
 
         window = MainWindow(db, engine, bridge, auth)
-        screen = app.primaryScreen().availableGeometry()
-        window.resize(min(1480, max(960, int(screen.width() * 0.92))),
-                      min(860, max(560, int(screen.height() * 0.88))))
+        screen = app.primaryScreen()
+        if screen:
+            geom = screen.availableGeometry()
+            window.resize(min(1480, max(960, int(geom.width() * 0.92))),
+                          min(860, max(560, int(geom.height() * 0.88))))
+        else:
+            window.resize(1100, 680)
         window.show()
         code = app.exec()
         engine.shutdown()

@@ -7,7 +7,10 @@ set PYTHON_LAZY_IMPORTS=
 set PYTHONLAZYIMPORTS=
 if not defined ORDERDESK_DATA set ORDERDESK_DATA=%~dp0data
 
-:: 1. Первинне налаштування оточення при першому запуску
+:: 1. Закриваємо підвислі фонові процеси, якщо вони тримають файли або базу даних
+taskkill /F /IM pythonw.exe >nul 2>&1
+
+:: 2. Первинне налаштування оточення при першому запуску
 if not exist "venv\Scripts\python.exe" (
     echo [OrderDesk] First run setup: creating virtual environment...
     python -m venv venv
@@ -25,7 +28,7 @@ if not exist "venv\Scripts\python.exe" (
     )
 )
 
-:: 2. Автоматична перевірка та завантаження оновлень
+:: 3. Автоматична перевірка та завантаження оновлень
 if exist ".git" (
     echo [OrderDesk] Checking for updates from git...
     git fetch --quiet origin 2>nul
@@ -35,6 +38,15 @@ if exist ".git" (
     venv\Scripts\python.exe -m dashboard.core.updater
 )
 
-:: 3. Запуск інтерфейсу OrderDesk
-start "" venv\Scripts\pythonw.exe -m dashboard
-exit /b 0
+:: 4. Запуск програми (з виводом помилки, якщо вона станеться)
+echo [OrderDesk] Starting OrderDesk...
+venv\Scripts\python.exe -m dashboard
+if errorlevel 1 (
+    echo.
+    echo ========================================================
+    echo [ERROR] Program crashed with error code %errorlevel%.
+    echo Check logs in data\error.log or data\app_launcher.log
+    echo ========================================================
+    echo.
+    pause
+)
