@@ -25,9 +25,8 @@ if not exist "venv\Scripts\python.exe" (
 venv\Scripts\python.exe -c "import PySide6, httpx, playwright, keyring" >nul 2>&1
 if errorlevel 1 (
     echo [OrderDesk] Installing / updating required libraries...
-    venv\Scripts\python.exe -m pip install --upgrade pip
-    if exist "requirements.txt" (
-        venv\Scripts\python.exe -m pip install -r requirements.txt
+    venv\Scripts\python.exe -m pip install -r requirements.txt
+    if not errorlevel 1 (
         echo [OrderDesk] Installing Playwright Chromium browser...
         venv\Scripts\python.exe -m playwright install chromium
     )
