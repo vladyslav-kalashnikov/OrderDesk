@@ -33,6 +33,11 @@ if [ -f "data/auth_config.json" ]; then
     cp data/auth_config.json "$TMP_DIR/data/"
 fi
 
+# Записуємо поточний коміт версії
+if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git rev-parse HEAD > "$TMP_DIR/data/version_commit.txt"
+fi
+
 # 4. Видаляємо тимчасові файли кешу та бекапів
 find "$TMP_DIR" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 find "$TMP_DIR" -name "*.pyc" -delete 2>/dev/null || true

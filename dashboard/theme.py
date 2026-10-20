@@ -147,12 +147,12 @@ QTableWidget {
     gridline-color: transparent; outline: 0;
     selection-background-color: @accentSoft; selection-color: @text;
 }
-QTableWidget::item { padding: 0 12px; border-bottom: 1px solid @border; }
+QTableWidget::item { padding: 0 10px; border-bottom: 1px solid @border; }
 QTableWidget::item:hover { background: @hover; }
 QTableWidget::item:selected { background: @accentSoft; }
 QHeaderView::section {
     background: @card; color: @muted; font-size: 11px; font-weight: 700; letter-spacing: 0.8px;
-    border: none; border-bottom: 1px solid @border; padding: 12px 12px;
+    border: none; border-bottom: 1px solid @border; padding: 8px 10px;
 }
 QTableCornerButton::section { background: @surface; border: none; }
 
@@ -171,12 +171,13 @@ QScrollArea { background: transparent; border: none; }
 QScrollArea#detailsScroll > QWidget#qt_scrollarea_viewport,
 QScrollArea#sidebarScroll > QWidget#qt_scrollarea_viewport { background: transparent; }
 
-QScrollBar:vertical { background: transparent; width: 8px; margin: 2px; }
-QScrollBar:horizontal { background: transparent; height: 8px; margin: 2px; }
-QScrollBar::handle { background: @border; border-radius: 3px; min-height: 30px; min-width: 30px; }
+QScrollBar:vertical { background: transparent; width: 6px; margin: 0; }
+QScrollBar:horizontal { background: transparent; height: 6px; margin: 0; }
+QScrollBar::handle { background: @border; border-radius: 3px; min-height: 24px; min-width: 24px; }
 QScrollBar::handle:hover { background: @muted2; }
 QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
 QScrollBar::add-page, QScrollBar::sub-page { background: none; }
+QScrollArea#sidebarScroll QScrollBar:vertical { width: 4px; }
 
 QSplitter::handle { background: @border; }
 
@@ -193,7 +194,7 @@ QComboBox QAbstractItemView {
 }
 QPlainTextEdit#logView, QTextBrowser#logView { background: @surface; border: 1px solid @border; border-radius: 10px; padding: 6px; }
 QPushButton#chip {
-    background: @surface; border: 1px solid @border; border-radius: 16px; padding: 6px 14px; color: @muted; font-weight: 600;
+    background: @surface; border: 1px solid @border; border-radius: 14px; padding: 4px 11px; color: @muted; font-weight: 600;
 }
 QPushButton#chip:hover { color: @text; border-color: @muted2; }
 QPushButton#chip:checked { background: @accent; border-color: @accent; color: #ffffff; }
@@ -202,6 +203,8 @@ QPushButton#chip:checked { background: @accent; border-color: @accent; color: #f
 #statusBannerError { background: @redSoft; border: 1px solid @red; border-radius: 9px; padding: 10px 14px; }
 #statusBannerSuccess { background: @greenSoft; border: 1px solid @green; border-radius: 9px; padding: 10px 14px; }
 #statusBannerInfo { background: @accentSoft; border: 1px solid @accent; border-radius: 9px; padding: 10px 14px; }
+#updateBanner { background: @accentSoft; border-bottom: 1px solid @accent; }
+#updateBannerTitle { font-weight: 600; font-size: 13px; color: @text; }
 QPushButton#rowBtn { padding: 2px 8px; border-radius: 6px; min-width: 26px; }
 QPushButton#rowStart { color: @green; padding: 2px 8px; border-radius: 6px; min-width: 26px; }
 QPushButton#rowStop { color: @red; padding: 2px 8px; border-radius: 6px; min-width: 26px; }

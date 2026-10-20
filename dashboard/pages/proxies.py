@@ -76,7 +76,19 @@ class ProxiesPage(Page):
         check.clicked.connect(self.check_selected)
         delete.clicked.connect(self.delete_selected)
 
-        self.table = DataTable(["ID", "НАЗВА", "АДРЕСА", "ЛОГІН", "IP", "ЗАТРИМКА", "СТАТУС", "ПЕРЕВІРЕНО"], stretch=(1,))
+        self.table = DataTable(
+            ["ID", "НАЗВА", "АДРЕСА", "ЛОГІН", "IP", "ЗАТРИМКА", "СТАТУС", "ПЕРЕВІРЕНО"],
+            stretch=(1,),
+            widths={
+                0: 44,
+                2: 160,
+                3: 110,
+                4: 120,
+                5: 75,
+                6: 85,
+                7: 130,
+            },
+        )
         self.stack = TableOrEmpty(self.table, "Проксі ще немає", "Без проксі акаунти ходять напряму з вашої IP-адреси")
         self.body.addWidget(self.stack)
         self.refresh()

@@ -119,23 +119,24 @@ class StatCard(QFrame):
         super().__init__(parent)
         self.setObjectName("statCard")
         self._higher_is_better = higher_is_better
+        self._title = title
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 8, 8)
+        layout.setContentsMargins(4, 6, 4, 6)
         layout.setSpacing(1)
 
         title_label = QLabel(title)
         title_label.setObjectName("statTitle")
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._value = QLabel("0")
         self._value.setObjectName("statValue")
-        self._delta = QLabel()
+        self._value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._delta = QLabel("• 0")
         self._delta.setObjectName("statDelta")
-        since_label = QLabel("від вчора")
-        since_label.setObjectName("statSince")
+        self._delta.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         layout.addWidget(title_label)
         layout.addWidget(self._value)
         layout.addWidget(self._delta)
-        layout.addWidget(since_label)
         self.set_values(0, 0)
 
     def set_values(self, value: int, delta: int) -> None:
@@ -148,18 +149,19 @@ class StatCard(QFrame):
             color = theme.GREEN if good else theme.RED
         self._delta.setText(f"{arrow} {abs(delta)}")
         self._delta.setStyleSheet(f"color: {color}; font-weight: 600;")
+        self.setToolTip(f"{self._title}: {value} (зміна від вчора: {arrow} {abs(delta)})")
 
 
 class RingProgress(QWidget):
     """Кругове кільце прогресу з відсотком і підписом усередині (малюється QPainter)."""
 
-    THICKNESS = 10
+    THICKNESS = 7
 
     def __init__(self, caption: str, parent=None):
         super().__init__(parent)
         self._value = 0.0
         self._caption = caption
-        self.setMinimumSize(150, 150)
+        self.setMinimumSize(90, 85)
 
     def set_value(self, value: float) -> None:
         self._value = max(0.0, min(100.0, value))
@@ -191,19 +193,19 @@ class RingProgress(QWidget):
             painter.drawArc(rect, 90 * 16, -round(self._value / 100 * 360 * 16))
 
         value_font = QFont(self.font())
-        value_font.setPixelSize(int(side * 0.22))
+        value_font.setPixelSize(max(13, int(side * 0.24)))
         value_font.setWeight(QFont.Weight.Bold)
         painter.setFont(value_font)
         painter.setPen(QColor(theme.TEXT))
-        value_rect = QRectF(rect.left(), rect.top() + side * 0.24, side, side * 0.28)
+        value_rect = QRectF(rect.left(), rect.top() + side * 0.20, side, side * 0.32)
         painter.drawText(value_rect, _flags(Qt.AlignmentFlag.AlignCenter), f"{self._value:.0f}%")
 
         caption_font = QFont(self.font())
-        caption_font.setPixelSize(11)
+        caption_font.setPixelSize(10)
         painter.setFont(caption_font)
         painter.setPen(QColor(theme.MUTED))
-        inner = side - 2 * self.THICKNESS - 24
-        caption_rect = QRectF(self.width() / 2 - inner / 2, value_rect.bottom() + 2, inner, side * 0.3)
+        inner = side - 2 * self.THICKNESS - 12
+        caption_rect = QRectF(self.width() / 2 - inner / 2, value_rect.bottom() - 2, inner, side * 0.35)
         painter.drawText(
             caption_rect,
             _flags(Qt.AlignmentFlag.AlignHCenter, Qt.AlignmentFlag.AlignTop, Qt.TextFlag.TextWordWrap),

@@ -21,6 +21,28 @@ def main() -> int:
     args, qt_args = parser.parse_known_args()
 
     paths.ensure_dirs()
+    log_path = paths.data_dir() / "app_launcher.log"
+    try:
+        if sys.stdout is None or not hasattr(sys.stdout, "write"):
+            sys.stdout = open(log_path, "a", encoding="utf-8", buffering=1)
+        if sys.stderr is None or not hasattr(sys.stderr, "write"):
+            sys.stderr = open(log_path, "a", encoding="utf-8", buffering=1)
+    except Exception:
+        pass
+
+    def _handle_exception(exc_type, exc_value, exc_traceback):
+        import traceback
+        err_file = paths.data_dir() / "error.log"
+        try:
+            with open(err_file, "a", encoding="utf-8") as f:
+                f.write(f"\n{'=' * 60}\nUncaught Exception:\n")
+                traceback.print_exception(exc_type, exc_value, exc_traceback, file=f)
+        except Exception:
+            pass
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+    sys.excepthook = _handle_exception
+
     db = Database(paths.db_path())
     if args.demo:
         for order in build_demo_data().orders:
@@ -55,7 +77,8 @@ def main() -> int:
 
         window = MainWindow(db, engine, bridge, auth)
         screen = app.primaryScreen().availableGeometry()
-        window.resize(min(1600, int(screen.width() * 0.92)), min(920, int(screen.height() * 0.9)))
+        window.resize(min(1480, max(960, int(screen.width() * 0.92))),
+                      min(860, max(560, int(screen.height() * 0.88))))
         window.show()
         code = app.exec()
         engine.shutdown()

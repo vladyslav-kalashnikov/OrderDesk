@@ -143,7 +143,19 @@ class AccountsPage(Page):
         reset.clicked.connect(self.reset_sessions)
         delete.clicked.connect(self.delete_selected)
 
-        self.table = DataTable(["ID", "EMAIL", "ПРОКСІ", "ДОСТАВКА", "ОПЛАТА", "СЕСІЯ", "СТАТУС", "ОСТАННЯ ПОМИЛКА"], stretch=(COL_ERROR,))
+        self.table = DataTable(
+            ["ID", "EMAIL", "ПРОКСІ", "ДОСТАВКА", "ОПЛАТА", "СЕСІЯ", "СТАТУС", "ОСТАННЯ ПОМИЛКА"],
+            stretch=(COL_ERROR,),
+            widths={
+                COL_ID: 44,
+                COL_EMAIL: 170,
+                COL_PROXY: 130,
+                COL_DELIVERY: 160,
+                COL_PAYMENT: 110,
+                COL_SESSION: 110,
+                COL_STATUS: 85,
+            },
+        )
         self.table.doubleClicked.connect(lambda index: self.edit_account(self.table.row_id(index.row())))
         self.stack = TableOrEmpty(self.table, "Акаунтів ще немає",
                                   "Крок 1: «+ Акаунт» (email і пароль). Крок 2: «Увійти вручну» — пройдіть вхід у вікні браузера.")

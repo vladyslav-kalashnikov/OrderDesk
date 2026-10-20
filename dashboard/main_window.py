@@ -1,7 +1,7 @@
 """Головне вікно: бокова панель + сторінки; слухає рушій і оновлює дані."""
 from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QMainWindow, QMessageBox, QSplitter, QStackedWidget, QSystemTrayIcon,
+    QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QSplitter, QStackedWidget, QSystemTrayIcon, QVBoxLayout,
 )
 
 from . import APP_NAME, theme
@@ -31,7 +31,7 @@ class MainWindow(QMainWindow):
         self.db, self.engine, self.auth = db, engine, auth
         self.relogin_requested = False
         self.setWindowTitle(f"{APP_NAME} — моніторинг і замовлення")
-        self.setMinimumSize(1180, 720)
+        self.setMinimumSize(940, 540)
 
         root = QFrame()
         root.setObjectName("root")
@@ -64,11 +64,21 @@ class MainWindow(QMainWindow):
         for page in (self.splitter, self.accounts, self.monitoring, self.proxies, self.logs, self.settings, self.help):
             self.pages.addWidget(page)
 
+        main_area = QFrame()
+        main_layout = QVBoxLayout(main_area)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        self._build_update_banner()
+        main_layout.addWidget(self.update_banner)
+        main_layout.addWidget(self.pages, 1)
+
         layout.addWidget(self.sidebar)
-        layout.addWidget(self.pages, 1)
+        layout.addWidget(main_area, 1)
         self.setCentralWidget(root)
 
         self.sidebar.page_changed.connect(self._on_page_changed)
+        self.sidebar.update_requested.connect(lambda: self.check_for_updates(notify_if_latest=True))
         self.cabinet.order_selected.connect(self.show_order)
         self.cabinet.sync_requested.connect(lambda: self.engine.sync_orders())
         self.details.closed.connect(self.hide_details)
@@ -98,6 +108,13 @@ class MainWindow(QMainWindow):
         self._stats_timer.timeout.connect(self.refresh_sidebar)
         self._stats_timer.start()
         self.refresh_sidebar()
+
+        # Автоматична перевірка оновлень з GitHub
+        QTimer.singleShot(4000, lambda: self.check_for_updates(False))
+        self._update_timer = QTimer(self)
+        self._update_timer.setInterval(15 * 60 * 1000)
+        self._update_timer.timeout.connect(lambda: self.check_for_updates(False))
+        self._update_timer.start()
 
     def _on_log(self, entry) -> None:
         self.logs.append(entry)
@@ -200,8 +217,87 @@ class MainWindow(QMainWindow):
             self.relogin_requested = True
             self.close()
 
+    def _build_update_banner(self) -> None:
+        self.update_banner = QFrame()
+        self.update_banner.setObjectName("updateBanner")
+        self.update_banner.hide()
+        row = QHBoxLayout(self.update_banner)
+        row.setContentsMargins(16, 7, 16, 7)
+        row.setSpacing(10)
+
+        icon = QLabel("🚀")
+        icon.setStyleSheet("font-size: 16px;")
+        self.update_msg = QLabel("Доступне нове оновлення OrderDesk")
+        self.update_msg.setObjectName("updateBannerTitle")
+
+        self.update_btn = QPushButton("Оновити та перезапустити")
+        self.update_btn.setObjectName("primary")
+        self.update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_btn.clicked.connect(self._apply_inapp_update)
+
+        dismiss_btn = QPushButton("✕")
+        dismiss_btn.setObjectName("ghost")
+        dismiss_btn.setFixedSize(24, 24)
+        dismiss_btn.setToolTip("Сховати сповіщення")
+        dismiss_btn.clicked.connect(self.update_banner.hide)
+
+        row.addWidget(icon)
+        row.addWidget(self.update_msg, 1)
+        row.addWidget(self.update_btn)
+        row.addWidget(dismiss_btn)
+
+    def check_for_updates(self, notify_if_latest: bool = False) -> None:
+        def _check():
+            try:
+                from .core.updater import UpdateManager
+                mgr = UpdateManager()
+                has_update, sha, msg, zip_url = mgr.check_update()
+                if has_update:
+                    self._on_update_found(sha, msg, zip_url)
+                elif notify_if_latest:
+                    from .pages.common import info
+                    QTimer.singleShot(0, lambda: info(self, "Оновлення", "У вас встановлено найновішу версію OrderDesk."))
+            except Exception as exc:
+                if notify_if_latest:
+                    from .pages.common import info
+                    QTimer.singleShot(0, lambda: info(self, "Оновлення", f"Не вдалося перевірити оновлення: {exc}"))
+
+        import threading
+        threading.Thread(target=_check, daemon=True).start()
+
+    def _on_update_found(self, sha: str, msg: str, zip_url: str) -> None:
+        self._pending_update = (sha, msg, zip_url)
+        def _show():
+            short_msg = msg[:65] + ("…" if len(msg) > 65 else "")
+            self.update_msg.setText(f"Доступне нове оновлення: {short_msg}")
+            self.update_banner.show()
+        QTimer.singleShot(0, _show)
+
+    def _apply_inapp_update(self) -> None:
+        if not getattr(self, "_pending_update", None):
+            return
+        sha, msg, zip_url = self._pending_update
+        self.update_btn.setEnabled(False)
+        self.update_btn.setText("Встановлення…")
+
+        def _worker():
+            from .core.updater import UpdateManager, restart_application
+            mgr = UpdateManager()
+            ok, err = mgr.apply_update(zip_url, sha)
+            if ok:
+                QTimer.singleShot(500, restart_application)
+            else:
+                QTimer.singleShot(0, lambda: self.update_msg.setText(f"Помилка: {err}"))
+                QTimer.singleShot(0, lambda: self.update_btn.setEnabled(True))
+                QTimer.singleShot(0, lambda: self.update_btn.setText("Спробувати знову"))
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+
     def closeEvent(self, event):
         self.statusBar().showMessage("Зупиняємо завдання і браузер…")
         self._stats_timer.stop()
+        if hasattr(self, "_update_timer"):
+            self._update_timer.stop()
         self.engine.shutdown()
         super().closeEvent(event)

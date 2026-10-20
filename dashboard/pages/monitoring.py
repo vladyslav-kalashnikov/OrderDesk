@@ -94,9 +94,19 @@ class MonitoringPage(Page):
         self._build_quick_add()
         self._build_filters()
 
-        self.table = DataTable(["ID", "АКАУНТ", "ТОВАР", "РЕЖИМ", "ІНТЕРВАЛ", "СТАТУС", "ОСТАННЯ ПОДІЯ", ""],
-                               stretch=(COL_LOG,))
-        self.table.setColumnWidth(COL_PRODUCT, 260)
+        self.table = DataTable(
+            ["ID", "АКАУНТ", "ТОВАР", "РЕЖИМ", "ІНТЕРВАЛ", "СТАТУС", "ОСТАННЯ ПОДІЯ", ""],
+            stretch=(COL_LOG,),
+            widths={
+                COL_ID: 44,
+                COL_ACCOUNT: 155,
+                COL_PRODUCT: 230,
+                COL_MODE: 120,
+                COL_INTERVAL: 65,
+                COL_STATUS: 90,
+                COL_ACTIONS: 58,
+            },
+        )
         self.stack = TableOrEmpty(self.table, "Завдань ще немає",
                                   "Вставте посилання на товар у рядку зверху і натисніть Enter")
         self.body.addWidget(self.stack)
@@ -137,7 +147,9 @@ class MonitoringPage(Page):
         self.quick_url.setPlaceholderText("Вставте посилання на товар і натисніть Enter — завдання створиться одразу")
         self.quick_url.returnPressed.connect(self.quick_add)
         self.quick_account = QComboBox()
+        self.quick_account.setMaximumWidth(180)
         self.quick_mode = QComboBox()
+        self.quick_mode.setMaximumWidth(160)
         for mode in TaskMode:
             self.quick_mode.addItem(mode.label, mode.value)
         self.quick_mode.setCurrentIndex(1)
@@ -219,10 +231,8 @@ class MonitoringPage(Page):
             f"{t.interval_sec} с", self._status_cell(t), t.last_log or "", "",
         ]) for t in shown]
         self.table.set_rows(rows)
-        self.table.horizontalHeader().resizeSection(COL_PRODUCT, 260)
         for r, t in enumerate(shown):
             self.table.setCellWidget(r, COL_ACTIONS, self._row_buttons(t.id, t.id in running))
-        self.table.setColumnWidth(COL_ACTIONS, 96)
         self.table.apply_filter(self.search.text())
         self.stack.update_state()
         self.subtitle.setText(f"Завдань: {len(tasks)} · запущено: {len(running)}")

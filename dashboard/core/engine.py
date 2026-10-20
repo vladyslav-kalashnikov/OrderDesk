@@ -34,6 +34,20 @@ class EngineEvents:
     def engine_state(self, ok: bool, message: str) -> None: ...
 
 
+def _log_exception(source: str, exc: BaseException) -> None:
+    """Записує повний стек викликів у data/error.log для швидкої діагностики."""
+    try:
+        import traceback
+        err_file = paths.data_dir() / "error.log"
+        err_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(err_file, "a", encoding="utf-8") as f:
+            f.write(f"\n{'=' * 60}\n[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Source: {source}\n")
+            f.write(f"Exception: {type(exc).__name__}: {exc}\n")
+            traceback.print_exception(type(exc), exc, exc.__traceback__, file=f)
+    except Exception:
+        pass
+
+
 def _short(exc: BaseException) -> str:
     # Помилки Playwright багаторядкові (з call log) — у таблицю йде лише перший рядок
     text = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
@@ -175,6 +189,7 @@ class Engine:
                     ],
                 )
             except Exception as exc:
+                _log_exception("engine.browser", exc)
                 message = _short(exc)
                 if "Executable doesn't exist" in str(exc):
                     message = "Chromium не встановлено: виконайте `python -m playwright install chromium`"
@@ -634,6 +649,7 @@ class Engine:
                 await self._ensure_logged_in(page, account)
                 self.log("INFO", source, f"{account.email}: вхід підтверджено")
         except Exception as exc:
+            _log_exception(source, exc)
             if interactive and _browser_was_closed(exc):
                 message = "Вікно ручного входу закрито до завершення; сесію не збережено"
                 self.events.data_changed("accounts")
@@ -854,6 +870,7 @@ class Engine:
             self._task_status(task_id, TaskStatus.ERROR, str(exc))
             self.log("ERROR", source, str(exc))
         except Exception as exc:
+            _log_exception(source, exc)
             message = _short(exc)
             self._task_status(task_id, TaskStatus.ERROR, message)
             self.log("ERROR", source, message)
@@ -1178,6 +1195,7 @@ class Engine:
                     self.events.data_changed("accounts")
                     self.log("ERROR", source, f"{account.email}: {exc}")
                 except Exception as exc:
+                    _log_exception(source, exc)
                     self.log("ERROR", source, f"{account.email}: збір замовлень не вдався — {_short(exc)}")
                 finally:
                     if context:

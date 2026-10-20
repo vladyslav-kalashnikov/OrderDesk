@@ -141,7 +141,17 @@ class LogsPage(Page):
 
     def copy_for_support(self) -> None:
         lines = [f"{e.ts} {e.level:<5} {e.source or ''}: {e.message}" for e in self._entries if self._allowed(e)]
-        QGuiApplication.clipboard().setText("\n".join(lines[-200:]))
+        text = "\n".join(lines[-200:])
+        err_file = paths.data_dir() / "error.log"
+        if err_file.exists():
+            try:
+                err_text = err_file.read_text(encoding="utf-8")
+                err_tail = "\n".join(err_text.strip().splitlines()[-100:])
+                if err_tail:
+                    text += f"\n\n--- Останній детальний traceback (error.log) ---\n{err_tail}"
+            except Exception:
+                pass
+        QGuiApplication.clipboard().setText(text)
         self.subtitle.setText(f"Скопійовано записів: {min(len(lines), 200)} — вставте їх у повідомлення розробнику")
 
     def open_last_screenshot(self) -> None:

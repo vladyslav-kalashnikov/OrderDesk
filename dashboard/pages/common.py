@@ -41,8 +41,8 @@ class Page(QFrame):
         super().__init__(parent)
         self.setObjectName("content")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(28, 24, 28, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(12)
 
         header = QHBoxLayout()
         titles = QVBoxLayout()
@@ -71,11 +71,12 @@ class Page(QFrame):
 class DataTable(QTableWidget):
     """Таблиця рядків з id у першій колонці. Перебудова зберігає виділення."""
 
-    def __init__(self, headers: list[str], stretch: tuple[int, ...] = (), parent=None):
+    def __init__(self, headers: list[str], stretch: tuple[int, ...] = (),
+                 widths: dict[int, int] | None = None, parent=None):
         super().__init__(0, len(headers), parent)
         self.setHorizontalHeaderLabels(headers)
         self.verticalHeader().setVisible(False)
-        self.verticalHeader().setDefaultSectionSize(52)
+        self.verticalHeader().setDefaultSectionSize(40)
         self.setAlternatingRowColors(True)
         self.setShowGrid(False)
         self.setWordWrap(False)
@@ -83,14 +84,22 @@ class DataTable(QTableWidget):
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         header = self.horizontalHeader()
         header.setHighlightSections(False)
         header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        header.setMinimumSectionSize(48)
+        header.setMinimumSectionSize(36)
+        widths = widths or {}
+        stretch_set = set(stretch)
         for col in range(len(headers)):
-            header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
-        for col in stretch:
-            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
+            if col in widths:
+                header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+                header.resizeSection(col, widths[col])
+            elif col in stretch_set:
+                header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
+            else:
+                header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        self._widths = widths
         self._filter = ""
 
     def set_rows(self, rows: list[tuple[int, list[Cell]]]) -> None:
@@ -101,12 +110,18 @@ class DataTable(QTableWidget):
             for c, value in enumerate(cells):
                 text, color = value if isinstance(value, tuple) else (value, None)
                 item = QTableWidgetItem(text)
-                item.setToolTip(text if len(text) > 40 else "")
+                if text:
+                    item.setToolTip(text)
                 if color:
                     item.setForeground(QColor(color))
                 if c == 0:
                     item.setData(Qt.ItemDataRole.UserRole, row_id)
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.setItem(r, c, item)
+        # Підтримуємо задані ширини колонок без скидання при заповненні
+        header = self.horizontalHeader()
+        for col, width in self._widths.items():
+            header.resizeSection(col, width)
         self.clearSelection()
         flags = QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
         for r, (row_id, _) in enumerate(rows):

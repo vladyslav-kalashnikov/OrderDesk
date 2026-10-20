@@ -18,7 +18,7 @@ NAV_ITEMS = [
     ("⚙", "Налаштування"),
     ("?", "Інструкція"),
 ]
-NAV_ROW_HEIGHT = 38
+NAV_ROW_HEIGHT = 33
 
 
 class Sidebar(QFrame):
@@ -26,11 +26,12 @@ class Sidebar(QFrame):
     theme_toggled = Signal()
     font_changed = Signal(int)
     logout_requested = Signal()
+    update_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("sidebar")
-        self.setFixedWidth(264)
+        self.setFixedWidth(236)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -40,7 +41,7 @@ class Sidebar(QFrame):
         # Блок поточного користувача
         user_container = QWidget()
         user_layout = QVBoxLayout(user_container)
-        user_layout.setContentsMargins(14, 0, 14, 8)
+        user_layout.setContentsMargins(12, 0, 12, 6)
         user_layout.setSpacing(0)
         self.user_box = self._build_user_box()
         user_layout.addWidget(self.user_box)
@@ -51,18 +52,19 @@ class Sidebar(QFrame):
         scroll.setObjectName("sidebarScroll")
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         body = QWidget()
         body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(14, 4, 14, 14)
-        body_layout.setSpacing(10)
+        body_layout.setContentsMargins(12, 2, 12, 8)
+        body_layout.setSpacing(6)
 
         self.nav = self._build_nav()
         body_layout.addWidget(self.nav)
-        body_layout.addSpacing(6)
+        body_layout.addSpacing(4)
         body_layout.addWidget(SectionLabel("Система"))
         body_layout.addWidget(self._build_system())
-        body_layout.addSpacing(6)
-        body_layout.addWidget(SectionLabel("Статистика (сьогодні)"))
+        body_layout.addSpacing(4)
+        body_layout.addWidget(SectionLabel("Статистика"))
         body_layout.addLayout(self._build_stats())
         body_layout.addWidget(self._build_ring())
         body_layout.addStretch()
@@ -101,7 +103,7 @@ class Sidebar(QFrame):
 
     def _build_brand(self) -> QHBoxLayout:
         row = QHBoxLayout()
-        row.setContentsMargins(20, 18, 20, 14)
+        row.setContentsMargins(16, 12, 16, 8)
         row.setSpacing(8)
         mark = QLabel("◆")
         mark.setObjectName("logoMark")
@@ -122,8 +124,8 @@ class Sidebar(QFrame):
             item = QListWidgetItem(f"{icon}   {title}")
             item.setSizeHint(QSize(0, NAV_ROW_HEIGHT))
             nav.addItem(item)
-        # +4 на вертикальні margin-и пунктів із QSS
-        nav.setFixedHeight(len(NAV_ITEMS) * (NAV_ROW_HEIGHT + 4) + 4)
+        # +3 на вертикальні margin-и пунктів із QSS
+        nav.setFixedHeight(len(NAV_ITEMS) * (NAV_ROW_HEIGHT + 3) + 4)
         nav.setCurrentRow(0)
         nav.currentRowChanged.connect(self.page_changed)
         return nav
@@ -132,8 +134,8 @@ class Sidebar(QFrame):
         card = QFrame()
         card.setObjectName("card")
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(10)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
 
         api_value = QHBoxLayout()
         api_value.setSpacing(6)
@@ -165,9 +167,10 @@ class Sidebar(QFrame):
 
     def _build_stats(self) -> QGridLayout:
         grid = QGridLayout()
-        grid.setSpacing(6)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(4)
         self._runs = StatCard("Запусків")
-        self._success = StatCard("Успішних")
+        self._success = StatCard("Успішно")
         self._errors = StatCard("Помилок", higher_is_better=False)
         grid.addWidget(self._runs, 0, 0)
         grid.addWidget(self._success, 0, 1)
@@ -178,9 +181,10 @@ class Sidebar(QFrame):
         card = QFrame()
         card.setObjectName("card")
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(10, 12, 10, 12)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._ring = RingProgress("успішних купівль")
-        self._ring.setFixedHeight(160)
+        self._ring.setFixedHeight(95)
         layout.addWidget(self._ring)
         return card
 
@@ -188,14 +192,15 @@ class Sidebar(QFrame):
         footer = QFrame()
         footer.setObjectName("sidebarFooter")
         row = QHBoxLayout(footer)
-        row.setContentsMargins(20, 12, 20, 14)
+        row.setContentsMargins(14, 8, 14, 10)
         version = QLabel(APP_VERSION)
         version.setObjectName("muted")
         author = QLabel(APP_AUTHOR)
         author.setObjectName("small")
         row.addWidget(version)
         row.addStretch()
-        for text, tip, handler in (("◐", "Світла / темна тема", self.theme_toggled.emit),
+        for text, tip, handler in (("⟳", "Перевірити оновлення", self.update_requested.emit),
+                                   ("◐", "Світла / темна тема", self.theme_toggled.emit),
                                    ("A−", "Менший шрифт", lambda: self.font_changed.emit(-1)),
                                    ("A+", "Більший шрифт", lambda: self.font_changed.emit(1))):
             b = QPushButton(text)
