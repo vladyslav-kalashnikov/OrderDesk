@@ -1,20 +1,28 @@
-"""Модуль автооновлення: перевірка та завантаження оновлень коду з GitHub."""
+"""Модуль автооновлення: перевірка та завантаження оновлень коду з GitHub (без зовнішніх залежностей)."""
 from __future__ import annotations
 
 import io
 import json
 import os
 import shutil
+import ssl
 import sys
+import urllib.error
+import urllib.request
 import zipfile
 from typing import Any
-
-import httpx
 
 from . import paths
 
 GITHUB_API_URL = "https://api.github.com/repos"
 DEFAULT_REPO = "vladyslav-kalashnikov/OrderDesk"
+
+
+def _ssl_context() -> ssl.SSLContext:
+    try:
+        return ssl._create_unverified_context()
+    except Exception:
+        return ssl.create_default_context()
 
 
 class UpdateManager:
@@ -53,13 +61,12 @@ class UpdateManager:
             return False, "", "", ""
 
         url = f"{GITHUB_API_URL}/{self.repo_name}/commits/main"
-        headers = {"User-Agent": "OrderDesk-Updater"}
+        req = urllib.request.Request(url, headers={"User-Agent": "OrderDesk-Updater"})
         try:
-            with httpx.Client(timeout=6.0) as client:
-                res = client.get(url, headers=headers)
-                if res.status_code != 200:
+            with urllib.request.urlopen(req, timeout=8.0, context=_ssl_context()) as resp:
+                if resp.status != 200:
                     return False, "", "", ""
-                data: dict[str, Any] = res.json()
+                data: dict[str, Any] = json.loads(resp.read().decode("utf-8"))
         except Exception:
             return False, "", "", ""
 
@@ -82,13 +89,12 @@ class UpdateManager:
         if not zip_url:
             return False, "Не вказано адресу завантаження оновлення."
 
-        headers = {"User-Agent": "OrderDesk-Updater"}
+        req = urllib.request.Request(zip_url, headers={"User-Agent": "OrderDesk-Updater"})
         try:
-            with httpx.Client(timeout=45.0, follow_redirects=True) as client:
-                res = client.get(zip_url, headers=headers)
-                if res.status_code != 200:
-                    return False, f"Помилка завантаження архіву (код {res.status_code})"
-                zip_bytes = res.content
+            with urllib.request.urlopen(req, timeout=60.0, context=_ssl_context()) as resp:
+                if resp.status != 200:
+                    return False, f"Помилка завантаження архіву (код {resp.status})"
+                zip_bytes = resp.read()
         except Exception as exc:
             return False, f"Не вдалося завантажити оновлення: {exc}"
 

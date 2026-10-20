@@ -19,16 +19,21 @@ if not exist "venv\Scripts\python.exe" (
         pause
         exit /b 1
     )
+)
+
+:: 3. Перевірка та автоматичне встановлення відсутніх бібліотек (httpx, PySide6 тощо)
+venv\Scripts\python.exe -c "import PySide6, httpx, playwright, keyring" >nul 2>&1
+if errorlevel 1 (
+    echo [OrderDesk] Installing / updating required libraries...
     venv\Scripts\python.exe -m pip install --upgrade pip
     if exist "requirements.txt" (
-        echo [OrderDesk] Installing dependencies...
         venv\Scripts\python.exe -m pip install -r requirements.txt
         echo [OrderDesk] Installing Playwright Chromium browser...
         venv\Scripts\python.exe -m playwright install chromium
     )
 )
 
-:: 3. Автоматична перевірка та завантаження оновлень
+:: 4. Автоматична перевірка та завантаження оновлень
 if exist ".git" (
     echo [OrderDesk] Checking for updates from git...
     git fetch --quiet origin 2>nul
@@ -38,7 +43,7 @@ if exist ".git" (
     venv\Scripts\python.exe -m dashboard.core.updater
 )
 
-:: 4. Запуск програми (з виводом помилки, якщо вона станеться)
+:: 5. Запуск програми (з виводом помилки, якщо вона станеться)
 echo [OrderDesk] Starting OrderDesk...
 venv\Scripts\python.exe -m dashboard
 if errorlevel 1 (
