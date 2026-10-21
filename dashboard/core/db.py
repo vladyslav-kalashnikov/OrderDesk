@@ -37,6 +37,7 @@ create table if not exists accounts (
     delivery_city text,
     delivery_warehouse text,
     payment_method text not null default 'card_link',
+    adspower_id text,
     created_at text not null
 );
 create table if not exists tasks (
@@ -126,6 +127,8 @@ class Database:
             self._conn.execute("alter table accounts add column delivery_warehouse text")
         if "payment_method" not in cols:
             self._conn.execute("alter table accounts add column payment_method text not null default 'card_link'")
+        if "adspower_id" not in cols:
+            self._conn.execute("alter table accounts add column adspower_id text")
         # Після аварійного виходу завдання могли лишитись «активними» — повертаємо в «Зупинено»
         self._conn.execute(
             "update tasks set status = ? where status in (?, ?, ?, ?, ?)",
@@ -190,21 +193,23 @@ class Database:
                     delivery_carrier: str = "nova",
                     delivery_city: str | None = None,
                     delivery_warehouse: str | None = None,
-                    payment_method: str = "card_link") -> int:
+                    payment_method: str = "card_link",
+                    adspower_id: str | None = None) -> int:
         return self._exec(
-            "insert into accounts (email, proxy_id, status, delivery_carrier, delivery_city, delivery_warehouse, payment_method, created_at) "
-            "values (?, ?, ?, ?, ?, ?, ?, ?)",
-            (email, proxy_id, AccountStatus.NEW.value, delivery_carrier, delivery_city, delivery_warehouse, payment_method, now()),
+            "insert into accounts (email, proxy_id, status, delivery_carrier, delivery_city, delivery_warehouse, payment_method, adspower_id, created_at) "
+            "values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (email, proxy_id, AccountStatus.NEW.value, delivery_carrier, delivery_city, delivery_warehouse, payment_method, adspower_id, now()),
         )
 
     def update_account_settings(self, account_id: int, proxy_id: int | None,
                                 delivery_carrier: str = "nova",
                                 delivery_city: str | None = None,
                                 delivery_warehouse: str | None = None,
-                                payment_method: str = "card_link") -> None:
+                                payment_method: str = "card_link",
+                                adspower_id: str | None = None) -> None:
         self._exec(
-            "update accounts set proxy_id = ?, delivery_carrier = ?, delivery_city = ?, delivery_warehouse = ?, payment_method = ? where id = ?",
-            (proxy_id, delivery_carrier, delivery_city, delivery_warehouse, payment_method, account_id),
+            "update accounts set proxy_id = ?, delivery_carrier = ?, delivery_city = ?, delivery_warehouse = ?, payment_method = ?, adspower_id = ? where id = ?",
+            (proxy_id, delivery_carrier, delivery_city, delivery_warehouse, payment_method, adspower_id, account_id),
         )
 
     def set_account_proxy(self, account_id: int, proxy_id: int | None) -> None:

@@ -205,6 +205,34 @@ class SettingsPage(Page):
         hint.setWordWrap(True)
         telegram.add_widget(hint)
         column.addWidget(telegram)
+
+        adspower = SectionCard("Антидетект-браузер AdsPower")
+        form = self._form()
+        self.adspower_url = QLineEdit()
+        self.adspower_url.setPlaceholderText("http://local.adspower.net:50325")
+        self._inputs["adspower_api_url"] = self.adspower_url
+
+        self.adspower_key = QLineEdit()
+        self.adspower_key.setPlaceholderText("необов'язково (якщо встановлено API Key в AdsPower)")
+        self.adspower_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._inputs["adspower_api_key"] = self.adspower_key
+
+        self.adspower_test = button("⚡ Перевірити зв'язок з AdsPower", tooltip="Перевірити, чи запущений AdsPower на цьому комп'ютері")
+        self.adspower_test.clicked.connect(self.test_adspower)
+
+        form.addRow(self._label("URL локального API"),
+                    self._with_hint(self.adspower_url, "Адреса локального API AdsPower. За замовчуванням: http://local.adspower.net:50325"))
+        form.addRow(self._label("API Key (якщо є)"),
+                    self._with_hint(self.adspower_key, "Потрібен лише якщо у вас в AdsPower увімкнено захист API ключем."))
+        form.addRow(self._label(""), self.adspower_test)
+        adspower.add_widget(self._wrap(form))
+        hint = QLabel("Щоб акаунт запускався в AdsPower: відкрийте вкладку «Акаунти», двічі клікніть по потрібному акаунту "
+                      "і вкажіть його ID або Serial Number з AdsPower.")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        adspower.add_widget(hint)
+        column.addWidget(adspower)
+
         column.addStretch()
 
         scroll.setWidget(content)
@@ -322,6 +350,40 @@ class SettingsPage(Page):
             except Exception as exc:  # noqa: BLE001
                 ok, detail = False, str(exc)
             info(self, "Telegram", "Повідомлення надіслано — перевірте Telegram." if ok else f"Не вдалося: {detail}")
+
+        QTimer.singleShot(200, poll)
+
+    def test_adspower(self) -> None:
+        import threading
+        from ..core.adspower import AdsPowerClient
+
+        url = self.adspower_url.text().strip() or "http://local.adspower.net:50325"
+        key = self.adspower_key.text().strip() or None
+        self.adspower_test.setEnabled(False)
+        self.adspower_test.setText("Перевірка…")
+
+        result: list[tuple[bool, str]] = []
+
+        def worker() -> None:
+            client = AdsPowerClient(base_url=url, api_key=key)
+            result.append(client.check_status())
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+
+        def poll() -> None:
+            if thread.is_alive():
+                QTimer.singleShot(200, poll)
+                return
+            self.adspower_test.setEnabled(True)
+            self.adspower_test.setText("⚡ Перевірити зв'язок з AdsPower")
+            ok, msg = result[0] if result else (False, "Немає відповіді")
+            if ok:
+                info(self, "AdsPower", f"Зв'язок успішний!\n\n{msg}")
+            else:
+                info(self, "AdsPower помилка",
+                     f"Не вдалося з'єднатися з AdsPower:\n{msg}\n\n"
+                     "Переконайтеся, що програма AdsPower відкрита, і в ній увімкнено Local API.")
 
         QTimer.singleShot(200, poll)
 

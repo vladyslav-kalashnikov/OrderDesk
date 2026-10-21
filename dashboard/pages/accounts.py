@@ -9,7 +9,7 @@ from ..core.entities import Account, AccountStatus
 from ..core.secrets import delete_secret, get_secret, set_secret
 from .common import DataTable, Page, TableOrEmpty, button, confirm, info, state_cell
 
-COL_ID, COL_EMAIL, COL_PROXY, COL_DELIVERY, COL_PAYMENT, COL_SESSION, COL_STATUS, COL_ERROR = range(8)
+COL_ID, COL_EMAIL, COL_BROWSER, COL_PROXY, COL_DELIVERY, COL_PAYMENT, COL_SESSION, COL_STATUS, COL_ERROR = range(9)
 
 
 class PasswordDialog(QDialog):
@@ -71,6 +71,10 @@ class AccountDialog(QDialog):
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
         has_password = bool(account and get_secret("account", account.email))
         self.password.setPlaceholderText("збережено в Keychain — залиште порожнім" if has_password else "пароль від сайту")
+
+        self.adspower = QLineEdit(account.adspower_id or "" if account else "")
+        self.adspower.setPlaceholderText("ID або Serial Number (напр. 1 або k9abc12)")
+
         self.proxy = QComboBox()
         self.proxy.addItem("Без проксі", None)
         for proxy in db.proxies():
@@ -98,13 +102,15 @@ class AccountDialog(QDialog):
 
         form.addRow("Email", self.email)
         form.addRow("Пароль", self.password)
+        form.addRow("AdsPower профіль", self.adspower)
         form.addRow("Проксі", self.proxy)
         form.addRow("Служба доставки", self.carrier)
         form.addRow("Місто", self.city)
         form.addRow("Відділення / індекс", self.warehouse)
         form.addRow("Спосіб оплати", self.payment)
         layout.addLayout(form)
-        hint = QLabel("Пароль зберігається в Keychain. Доставка та оплата діють для авточекауту цього акаунта.")
+        hint = QLabel("Пароль зберігається в Keychain. Для AdsPower вкажіть ID або Serial Number з AdsPower "
+                      "(якщо порожньо — використовується звичайний Chromium).")
         hint.setObjectName("hint")
         layout.addWidget(hint)
 
@@ -144,14 +150,15 @@ class AccountsPage(Page):
         delete.clicked.connect(self.delete_selected)
 
         self.table = DataTable(
-            ["ID", "EMAIL", "ПРОКСІ", "ДОСТАВКА", "ОПЛАТА", "СЕСІЯ", "СТАТУС", "ОСТАННЯ ПОМИЛКА"],
+            ["ID", "EMAIL", "БРАУЗЕР", "ПРОКСІ", "ДОСТАВКА", "ОПЛАТА", "СЕСІЯ", "СТАТУС", "ОСТАННЯ ПОМИЛКА"],
             stretch=(COL_ERROR,),
             widths={
                 COL_ID: 44,
-                COL_EMAIL: 170,
-                COL_PROXY: 130,
-                COL_DELIVERY: 160,
-                COL_PAYMENT: 110,
+                COL_EMAIL: 165,
+                COL_BROWSER: 110,
+                COL_PROXY: 120,
+                COL_DELIVERY: 150,
+                COL_PAYMENT: 105,
                 COL_SESSION: 110,
                 COL_STATUS: 85,
             },
@@ -185,8 +192,9 @@ class AccountsPage(Page):
             else:
                 delivery_disp = f"{carrier_label}: дефолт"
             payment_disp = "Картка" if getattr(a, "payment_method", "card_link") == "card_link" else "Післяплата"
+            browser_disp = f"⚡ Ads #{a.adspower_id}" if a.adspower_id else "Chromium"
             rows.append((a.id, [
-                str(a.id), a.email, proxies.get(a.proxy_id, "—"), delivery_disp, payment_disp, session, state_cell(a.status), a.last_error or "",
+                str(a.id), a.email, browser_disp, proxies.get(a.proxy_id, "—"), delivery_disp, payment_disp, session, state_cell(a.status), a.last_error or "",
             ]))
         self.table.set_rows(rows)
         self.stack.update_state()
@@ -209,6 +217,7 @@ class AccountsPage(Page):
             delivery_city=dialog.city.text().strip() or None,
             delivery_warehouse=dialog.warehouse.text().strip() or None,
             payment_method=dialog.payment.currentData(),
+            adspower_id=dialog.adspower.text().strip() or None,
         )
         self.refresh()
 
@@ -221,8 +230,9 @@ class AccountsPage(Page):
             return
         if dialog.password.text():
             set_secret("account", account.email, dialog.password.text())
-        if dialog.proxy.currentData() != account.proxy_id:
-            # Нова IP-адреса зі старими cookies виглядає підозріло — сесію скидаємо
+        new_ads_id = dialog.adspower.text().strip() or None
+        if dialog.proxy.currentData() != account.proxy_id or new_ads_id != account.adspower_id:
+            # Зміна проксі або профілю AdsPower — скидаємо збережену сесію
             self._drop_session(account.id)
         self.db.update_account_settings(
             account.id,
@@ -231,6 +241,7 @@ class AccountsPage(Page):
             delivery_city=dialog.city.text().strip() or None,
             delivery_warehouse=dialog.warehouse.text().strip() or None,
             payment_method=dialog.payment.currentData(),
+            adspower_id=new_ads_id,
         )
         self.refresh()
 

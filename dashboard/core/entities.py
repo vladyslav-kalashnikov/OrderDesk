@@ -76,6 +76,7 @@ class Account:
     delivery_city: str | None = None
     delivery_warehouse: str | None = None
     payment_method: str = "card_link"
+    adspower_id: str | None = None
 
 
 @dataclass

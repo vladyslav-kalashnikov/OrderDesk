@@ -19,6 +19,7 @@ from .entities import Account, AccountStatus, Proxy, ProxyStatus, TaskMode, Task
 from .proxy import ProxyManager
 from .secrets import get_secret
 from .site_config import SiteConfig
+from .adspower import AdsPowerClient, AdsPowerError
 
 
 class LoginError(Exception):
@@ -98,6 +99,10 @@ class Engine:
         self._flusher: asyncio.Task | None = None
         self._orders_loop: asyncio.Task | None = None
         self._orders_lock: asyncio.Lock | None = None
+        self._adspower = AdsPowerClient(getattr(self.config, "adspower_api_url", ""),
+                                        getattr(self.config, "adspower_api_key", ""))
+        self._adspower_browsers: dict[str, tuple[object, int]] = {}
+        self._adspower_lock: asyncio.Lock | None = None
 
     # ------------------------------------------------------------------ потік
 
@@ -112,6 +117,7 @@ class Engine:
         self._loop = loop
         self._browser_lock = asyncio.Lock()
         self._orders_lock = asyncio.Lock()
+        self._adspower_lock = asyncio.Lock()
         self._sem = asyncio.Semaphore(max(1, self.config.max_concurrency))
         self._proxies = ProxyManager(self.log)
         self._flusher = loop.create_task(self._flush_traffic_loop())
@@ -205,7 +211,70 @@ class Engine:
             if not ok:
                 self.log("ERROR", "engine", message)
 
+    async def _get_adspower_browser(self, account: Account):
+        profile_key = account.adspower_id.strip()
+        async with self._adspower_lock:
+            if profile_key in self._adspower_browsers:
+                browser, ref_count = self._adspower_browsers[profile_key]
+                if browser.is_connected():
+                    self._adspower_browsers[profile_key] = (browser, ref_count + 1)
+                    return browser
+                else:
+                    del self._adspower_browsers[profile_key]
+
+            if self._pw is None:
+                from playwright.async_api import async_playwright
+                self._pw = await async_playwright().start()
+
+            self.log("INFO", f"account#{account.id}", f"Запуск профілю AdsPower #{profile_key}…")
+            try:
+                ws_endpoint = await self._adspower.start_browser(profile_key)
+            except Exception as exc:
+                _log_exception(f"adspower#{profile_key}", exc)
+                raise AdsPowerError(f"Помилка запуску AdsPower: {_short(exc)}") from exc
+
+            try:
+                browser = await self._pw.chromium.connect_over_cdp(ws_endpoint)
+            except Exception as exc:
+                _log_exception(f"adspower.cdp#{profile_key}", exc)
+                raise AdsPowerError(f"Не вдалося підключитися через CDP до AdsPower: {_short(exc)}") from exc
+
+            self._adspower_browsers[profile_key] = (browser, 1)
+            return browser
+
+    async def _release_adspower_browser(self, account: Account | None, close_browser: bool = False):
+        if not account or not getattr(account, "adspower_id", None):
+            return
+        profile_key = account.adspower_id.strip()
+        async with self._adspower_lock:
+            if profile_key not in self._adspower_browsers:
+                return
+            browser, ref_count = self._adspower_browsers[profile_key]
+            ref_count -= 1
+            if ref_count <= 0 or close_browser:
+                del self._adspower_browsers[profile_key]
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+                if close_browser:
+                    try:
+                        await self._adspower.stop_browser(profile_key)
+                    except Exception:
+                        pass
+            else:
+                self._adspower_browsers[profile_key] = (browser, ref_count)
+
     async def _new_context(self, account: Account | None, proxy: Proxy | None, browser=None):
+        if account and getattr(account, "adspower_id", None):
+            browser = await self._get_adspower_browser(account)
+            context = browser.contexts[0] if browser.contexts else await browser.new_context()
+            timeout_ms = self.config.page_timeout_sec * 1000
+            context.set_default_timeout(timeout_ms)
+            context.set_default_navigation_timeout(timeout_ms)
+            context.on("requestfinished", self._on_request_finished)
+            return context
+
         browser = browser or await self._get_browser()
         kwargs = {}
         if proxy:
@@ -611,19 +680,26 @@ class Engine:
         source = f"account#{account.id}"
         headed = None
         context = None
+        page = None
+        is_adspower = bool(account and getattr(account, "adspower_id", None))
         try:
             if interactive:
-                await self._get_browser()
-                headed = await self._pw.chromium.launch(
-                    channel="chrome",
-                    headless=False,
-                    args=[
-                        "--proxy-bypass-list=<-loopback>",
-                        "--disable-blink-features=AutomationControlled"
-                    ]
-                )
-                context = await self._new_context(account, proxy, browser=headed)
-                page = await context.new_page()
+                if is_adspower:
+                    context = await self._new_context(account, proxy)
+                    page = context.pages[0] if context.pages else await context.new_page()
+                else:
+                    await self._get_browser()
+                    headed = await self._pw.chromium.launch(
+                        channel="chrome",
+                        headless=False,
+                        args=[
+                            "--proxy-bypass-list=<-loopback>",
+                            "--disable-blink-features=AutomationControlled"
+                        ]
+                    )
+                    context = await self._new_context(account, proxy, browser=headed)
+                    page = await context.new_page()
+
                 await page.goto(self.config.login_url, wait_until="domcontentloaded")
                 if await self._is_bot_check(page):
                     await self._wait_for_manual_challenge(page, account, headed=True)
@@ -637,7 +713,7 @@ class Engine:
 
                     except Exception as exc:
                         raise LoginError(f"Не вдалося підготувати форму на {page.url}: {_short(exc)}") from exc
-                self.log("INFO", source, "Відкрито вікно браузера — завершіть вхід вручну (чекаємо до 5 хв)")
+                self.log("INFO", source, f"Відкрито вікно {'AdsPower' if is_adspower else 'браузера'} — завершіть вхід вручну (чекаємо до 5 хв)")
                 try:
                     await page.locator(self.config.logged_in_selector).first.wait_for(state="visible", timeout=300_000)
                 except Exception as exc:
@@ -645,7 +721,7 @@ class Engine:
                 await self._save_session(context, account)
             else:
                 context = await self._new_context(account, proxy)
-                page = await context.new_page()
+                page = context.pages[0] if (is_adspower and context.pages) else await context.new_page()
                 await self._ensure_logged_in(page, account)
                 self.log("INFO", source, f"{account.email}: вхід підтверджено")
         except Exception as exc:
@@ -660,17 +736,25 @@ class Engine:
                 self.events.data_changed("accounts")
                 self.log("ERROR", source, f"{account.email}: {message}")
         finally:
-            if context:
-                try:
-                    await context.close()
-                except Exception:
-                    pass
-            if headed:
-                try:
-                    if headed.is_connected():
-                        await headed.close()
-                except Exception:
-                    pass
+            if is_adspower:
+                if page:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+                await self._release_adspower_browser(account, close_browser=True)
+            else:
+                if context:
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
+                if headed:
+                    try:
+                        if headed.is_connected():
+                            await headed.close()
+                    except Exception:
+                        pass
 
     # ------------------------------------------------------------- завдання
 
@@ -720,6 +804,8 @@ class Engine:
         run_id = self.db.start_run(task_id)
         result = "error"
         context = None
+        page = None
+        is_adspower = bool(account and getattr(account, "adspower_id", None))
         loop = asyncio.get_running_loop()
         
         try:
@@ -875,11 +961,19 @@ class Engine:
             self._task_status(task_id, TaskStatus.ERROR, message)
             self.log("ERROR", source, message)
         finally:
-            if context:
-                try:
-                    await context.close()
-                except Exception:
-                    pass
+            if is_adspower:
+                if page:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+                await self._release_adspower_browser(account)
+            else:
+                if context:
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
             self.db.finish_run(run_id, result)
             self._running.pop(task_id, None)
             self.events.data_changed("stats")
@@ -1174,11 +1268,13 @@ class Engine:
             for account in accounts:
                 source = f"account#{account.id}"
                 proxy = self.db.proxy(account.proxy_id) if account.proxy_id else None
+                is_adspower = bool(account and getattr(account, "adspower_id", None))
+                page = None
                 context = None
                 try:
                     async with self._sem:
                         context = await self._new_context(account, proxy)
-                        page = await context.new_page()
+                        page = context.pages[0] if (is_adspower and context.pages) else await context.new_page()
                         await self._ensure_logged_in(page, account)
                         rows = await fetch_user_orders(page, self.config, lambda m: self.log("INFO", source, m))
                     updates: list[tuple] = []
@@ -1198,8 +1294,18 @@ class Engine:
                     _log_exception(source, exc)
                     self.log("ERROR", source, f"{account.email}: збір замовлень не вдався — {_short(exc)}")
                 finally:
-                    if context:
-                        await context.close()
+                    if is_adspower:
+                        if page:
+                            try:
+                                await page.close()
+                            except Exception:
+                                pass
+                        await self._release_adspower_browser(account, close_browser=True)
+                    elif context:
+                        try:
+                            await context.close()
+                        except Exception:
+                            pass
             if accounts:
                 self.log("INFO", "orders", f"Замовлення оновлено: нових {total_new}, змінених {total_changed}")
         self.events.data_changed("orders")
@@ -1269,6 +1375,8 @@ class Engine:
             self.log("INFO", "engine", "Налаштування збережено; браузер і ліміт застосуються після зупинки завдань")
             return
         self._sem = asyncio.Semaphore(max(1, self.config.max_concurrency))
+        self._adspower.base_url = getattr(self.config, "adspower_api_url", "http://local.adspower.net:50325")
+        self._adspower.api_key = getattr(self.config, "adspower_api_key", "")
         if self._browser:
             await self._browser.close()
             self._browser = None
@@ -1280,6 +1388,12 @@ class Engine:
         for loop_task in (self._flusher, self._orders_loop):
             if loop_task:
                 loop_task.cancel()
+        for profile_key, (b, _) in list(self._adspower_browsers.items()):
+            try:
+                await b.close()
+            except Exception:
+                pass
+        self._adspower_browsers.clear()
         if self._browser:
             await self._browser.close()
         if self._pw:

@@ -79,16 +79,21 @@ class SiteConfig:
     telegram_enabled: bool = False
     telegram_chat_id: str = ""
 
+    # AdsPower (антидетект-браузер)
+    adspower_api_url: str = "http://local.adspower.net:50325"
+    adspower_api_key: str = ""
+
     @classmethod
-    def load(cls) -> "SiteConfig":
-        path = paths.site_config_path()
-        if not path.exists():
+    def load(cls, path=None) -> "SiteConfig":
+        target = path or paths.site_config_path()
+        if not target.exists():
             config = cls()
-            config.save()
+            config.save(target)
             return config
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(target.read_text(encoding="utf-8"))
         known = {f.name for f in fields(cls)}
         return cls(**{k: v for k, v in raw.items() if k in known})
 
-    def save(self) -> None:
-        paths.site_config_path().write_text(json.dumps(asdict(self), ensure_ascii=False, indent=2), encoding="utf-8")
+    def save(self, path=None) -> None:
+        target = path or paths.site_config_path()
+        target.write_text(json.dumps(asdict(self), ensure_ascii=False, indent=2), encoding="utf-8")
