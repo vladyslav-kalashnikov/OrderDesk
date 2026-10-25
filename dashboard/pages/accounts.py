@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
 from ..core.db import Database
 from ..core.engine import Engine
 from ..core.entities import Account, AccountStatus
+from ..core.fingerprint import delete_fingerprint
 from ..core.secrets import delete_secret, get_secret, set_secret
 from .common import DataTable, Page, TableOrEmpty, button, confirm, info, state_cell
 
@@ -109,8 +110,9 @@ class AccountDialog(QDialog):
         form.addRow("Відділення / індекс", self.warehouse)
         form.addRow("Спосіб оплати", self.payment)
         layout.addLayout(form)
-        hint = QLabel("Пароль зберігається в Keychain. Для AdsPower вкажіть ID або Serial Number з AdsPower "
-                      "(якщо порожньо — використовується звичайний Chromium).")
+        hint = QLabel("Пароль зберігається в Keychain. Кожен акаунт автоматично отримує власний ізольований "
+                      "антидетект-профіль (захист WebRTC, унікальний Canvas, WebGL, Audio, екран та CPU/RAM) — "
+                      "поле AdsPower можна залишити порожнім.")
         hint.setObjectName("hint")
         layout.addWidget(hint)
 
@@ -137,12 +139,14 @@ class AccountsPage(Page):
         add = button("+ Акаунт", "primary")
         login = button("Увійти", tooltip="Увійти автоматично (логін/пароль) і зберегти сесію")
         manual = button("Увійти вручну", tooltip="Відкриє вікно браузера: капчу чи 2FA вводите самі, сесія збережеться")
+        assign_proxies = button("Роздати проксі", tooltip="Автоматично прив'язати вільні проксі до акаунтів без проксі (1 проксі = 1 акаунт)")
         password = button("Змінити пароль", tooltip="Оновити збережений у Keychain пароль виділеного акаунта")
         reset = button("Скинути сесію")
         delete = button("Видалити", "danger")
-        for b in (add, login, manual, password, reset, delete):
+        for b in (add, login, manual, assign_proxies, password, reset, delete):
             self.actions.addWidget(b)
         add.clicked.connect(self.add_account)
+        assign_proxies.clicked.connect(self.auto_assign_proxies)
         password.clicked.connect(self.change_password)
         login.clicked.connect(lambda: self.login_selected(False))
         manual.clicked.connect(lambda: self.login_selected(True))
@@ -192,7 +196,7 @@ class AccountsPage(Page):
             else:
                 delivery_disp = f"{carrier_label}: дефолт"
             payment_disp = "Картка" if getattr(a, "payment_method", "card_link") == "card_link" else "Післяплата"
-            browser_disp = f"⚡ Ads #{a.adspower_id}" if a.adspower_id else "Chromium"
+            browser_disp = f"⚡ Ads #{a.adspower_id}" if a.adspower_id else "🛡 Антидетект"
             rows.append((a.id, [
                 str(a.id), a.email, browser_disp, proxies.get(a.proxy_id, "—"), delivery_disp, payment_disp, session, state_cell(a.status), a.last_error or "",
             ]))
@@ -274,8 +278,47 @@ class AccountsPage(Page):
             self.table.set_cell(account_id, COL_STATUS, "Вхід…")
             self.engine.login_account(account_id, interactive)
 
+    def auto_assign_proxies(self) -> None:
+        all_proxies = self.db.proxies()
+        if not all_proxies:
+            info(self, "Немає проксі", "Спочатку додайте проксі у вкладці «Проксі».")
+            return
+        accounts = self.db.accounts()
+        selected_ids = set(self.table.selected_ids())
+        targets = [a for a in accounts if (a.id in selected_ids if selected_ids else not a.proxy_id)]
+        if not targets:
+            info(self, "Усі мають проксі", "Усі акаунти вже мають прив'язані проксі (або виділіть акаунти, яким треба замінити проксі).")
+            return
+
+        used_proxy_ids = {a.proxy_id for a in accounts if a.proxy_id and a.id not in {t.id for t in targets}}
+        # Спочатку робочі вільні проксі, потім інші вільні, потім по колу
+        working_free = [p for p in all_proxies if p.id not in used_proxy_ids and p.status == "Працює"]
+        other_free = [p for p in all_proxies if p.id not in used_proxy_ids and p.status != "Працює"]
+        pool = working_free + other_free
+        if not pool:
+            pool = list(all_proxies)
+
+        assigned = 0
+        for idx, acc in enumerate(targets):
+            proxy = pool[idx % len(pool)]
+            if acc.proxy_id != proxy.id:
+                self._drop_session(acc.id)
+                self.db.update_account_settings(
+                    acc.id,
+                    proxy.id,
+                    delivery_carrier=acc.delivery_carrier,
+                    delivery_city=acc.delivery_city,
+                    delivery_warehouse=acc.delivery_warehouse,
+                    payment_method=acc.payment_method,
+                    adspower_id=acc.adspower_id,
+                )
+                assigned += 1
+        self.refresh()
+        info(self, "Проксі розподілено", f"Прив'язано проксі для акаунтів: {assigned}.")
+
     def _drop_session(self, account_id: int) -> None:
         self.engine.state_path(account_id).unlink(missing_ok=True)
+        delete_fingerprint(account_id)
         self.db.clear_account_session(account_id)
 
     def reset_sessions(self) -> None:

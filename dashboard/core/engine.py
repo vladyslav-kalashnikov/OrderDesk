@@ -20,6 +20,7 @@ from .proxy import ProxyManager
 from .secrets import get_secret
 from .site_config import SiteConfig
 from .adspower import AdsPowerClient, AdsPowerError
+from .fingerprint import CHROME_STEALTH_ARGS, build_init_script, load_or_create_fingerprint
 
 
 class LoginError(Exception):
@@ -189,10 +190,7 @@ class Engine:
                 self._browser = await self._pw.chromium.launch(
                     channel="chrome",
                     headless=self.config.headless,
-                    args=[
-                        "--proxy-bypass-list=<-loopback>",
-                        "--disable-blink-features=AutomationControlled"
-                    ],
+                    args=list(CHROME_STEALTH_ARGS),
                 )
             except Exception as exc:
                 _log_exception("engine.browser", exc)
@@ -277,11 +275,18 @@ class Engine:
 
         browser = browser or await self._get_browser()
         kwargs = {}
+        fp = None
+        if account:
+            fp = load_or_create_fingerprint(account.id, seed_extra=account.email)
+            kwargs.update(fp.to_context_kwargs())
         if proxy:
             kwargs["proxy"] = await self._proxies.playwright_settings(proxy)
         if account and self.state_path(account.id).exists():
             kwargs["storage_state"] = str(self.state_path(account.id))
         context = await browser.new_context(**kwargs)
+        if fp:
+            proxy_ip = (proxy.last_ip if proxy and proxy.last_ip else (proxy.host if proxy else None))
+            await context.add_init_script(build_init_script(fp, proxy_ip=proxy_ip))
         timeout_ms = self.config.page_timeout_sec * 1000
         context.set_default_timeout(timeout_ms)
         context.set_default_navigation_timeout(timeout_ms)
@@ -692,10 +697,7 @@ class Engine:
                     headed = await self._pw.chromium.launch(
                         channel="chrome",
                         headless=False,
-                        args=[
-                            "--proxy-bypass-list=<-loopback>",
-                            "--disable-blink-features=AutomationControlled"
-                        ]
+                        args=list(CHROME_STEALTH_ARGS),
                     )
                     context = await self._new_context(account, proxy, browser=headed)
                     page = await context.new_page()
