@@ -20,7 +20,7 @@ from .proxy import ProxyManager
 from .secrets import get_secret
 from .site_config import SiteConfig
 from .adspower import AdsPowerClient, AdsPowerError
-from .fingerprint import CHROME_STEALTH_ARGS, build_init_script, load_or_create_fingerprint
+from .fingerprint import CHROME_STEALTH_ARGS, load_or_create_fingerprint
 
 
 class LoginError(Exception):
@@ -275,18 +275,13 @@ class Engine:
 
         browser = browser or await self._get_browser()
         kwargs = {}
-        fp = None
         if account:
-            fp = load_or_create_fingerprint(account.id, seed_extra=account.email)
-            kwargs.update(fp.to_context_kwargs())
+            load_or_create_fingerprint(account.id, seed_extra=account.email)
         if proxy:
             kwargs["proxy"] = await self._proxies.playwright_settings(proxy)
         if account and self.state_path(account.id).exists():
             kwargs["storage_state"] = str(self.state_path(account.id))
         context = await browser.new_context(**kwargs)
-        if fp:
-            proxy_ip = (proxy.last_ip if proxy and proxy.last_ip else (proxy.host if proxy else None))
-            await context.add_init_script(build_init_script(fp, proxy_ip=proxy_ip))
         timeout_ms = self.config.page_timeout_sec * 1000
         context.set_default_timeout(timeout_ms)
         context.set_default_navigation_timeout(timeout_ms)
@@ -406,15 +401,97 @@ class Engine:
         "увага потрібна",
     )
 
+    async def _get_turnstile_state(self, page) -> dict:
+        """Перевіряє стан РЕАЛЬНО ВИДИМОГО блоку Cloudflare Turnstile на сторінці (300x65 праворуч від кнопки)."""
+        try:
+            return await page.evaluate(r"""() => {
+                const inputs = [...document.querySelectorAll('input[name="cf-turnstile-response"]')];
+                if (inputs.some(inp => inp.value && inp.value.trim().length > 10)) {
+                    return { present: true, solved: true, box: null };
+                }
+
+                const buyWrap = document.querySelector('#r_buy_intovar');
+                const buyRect = buyWrap ? buyWrap.getBoundingClientRect() : null;
+
+                const isVisibleTurnstileBox = (el) => {
+                    if (!el || !el.getBoundingClientRect) return null;
+                    if (buyWrap && (el === buyWrap || el.contains(buyWrap) || buyWrap.contains(el))) return null;
+                    const style = window.getComputedStyle(el);
+                    if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) return null;
+                    const r = el.getBoundingClientRect();
+                    // Віджет Turnstile має фіксований розмір ~300x65
+                    if (r.width >= 240 && r.width <= 340 && r.height >= 48 && r.height <= 85 && r.top >= 0 && r.left >= 0) {
+                        if (buyRect && buyRect.width > 0 && r.left < buyRect.right - 10) {
+                            return null;
+                        }
+                        return { x: r.left, y: r.top, width: r.width, height: r.height };
+                    }
+                    return null;
+                };
+
+                const iframes = [...document.querySelectorAll('iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"]')];
+                for (const f of iframes) {
+                    const b = isVisibleTurnstileBox(f);
+                    if (b) return { present: true, solved: false, box: b };
+                }
+
+                const containers = [...document.querySelectorAll('.cf-turnstile, [data-sitekey], #cf-turnstile')];
+                for (const c of containers) {
+                    const b = isVisibleTurnstileBox(c);
+                    if (b) return { present: true, solved: false, box: b };
+                }
+
+                for (const inp of inputs) {
+                    const p = inp.parentElement;
+                    const b = isVisibleTurnstileBox(p);
+                    if (b) return { present: true, solved: false, box: b };
+                }
+
+                if (buyWrap && buyWrap.parentElement && buyWrap.parentElement.parentElement) {
+                    const candidates = [...buyWrap.parentElement.parentElement.querySelectorAll('div, iframe')];
+                    for (const s of candidates) {
+                        const b = isVisibleTurnstileBox(s);
+                        if (b) return { present: true, solved: false, box: b };
+                    }
+                }
+
+                return { present: false, solved: false, box: null };
+            }""")
+        except Exception:
+            return {"present": False, "solved": False, "box": None}
+
+    async def _try_click_turnstile(self, page, box: dict | None = None) -> bool:
+        """Плавно наводить курсор і натискає чекбокс «Підтвердьте, що ви людина» у блоці Cloudflare Turnstile."""
+        try:
+            if not box:
+                state = await self._get_turnstile_state(page)
+                if state.get("solved") or not state.get("box"):
+                    return False
+                box = state["box"]
+            # Чекбокс у віджеті Cloudflare Turnstile (300x65) розташований за ~28px від лівого краю по центру висоти
+            click_x = box["x"] + 28 + random.uniform(-2.5, 2.5)
+            click_y = box["y"] + (box["height"] / 2.0) + random.uniform(-2.5, 2.5)
+            await page.mouse.move(click_x, click_y, steps=random.randint(7, 12))
+            await page.wait_for_timeout(random.randint(50, 110))
+            await page.mouse.down()
+            await page.wait_for_timeout(random.randint(35, 75))
+            await page.mouse.up()
+            return True
+        except Exception:
+            return False
+
     async def _is_bot_check(self, page) -> bool:
-        """Визначає сторінку перевірки, але не намагається її обходити."""
+        """Визначає сторінку перевірки, враховуючи чи вже розв'язаний віджет Turnstile."""
         try:
             url = (page.url or "").lower()
             if any(marker in url for marker in self.BOT_CHECK_MARKERS):
                 return True
+            ts_state = await self._get_turnstile_state(page)
+            if ts_state.get("present"):
+                if not ts_state.get("solved"):
+                    return True
             challenge_nodes = (
                 "#challenge-form, #cf-challenge-running, .cf-browser-verification, "
-                "input[name='cf-turnstile-response'], iframe[src*='challenges.cloudflare.com'], "
                 "[data-cf-challenge]"
             )
             if await page.locator(challenge_nodes).count():
@@ -440,33 +517,34 @@ class Engine:
 
     async def _wait_for_manual_challenge(self, page, account: Account, timeout_sec: int = 300,
                                         headed: bool | None = None) -> None:
-        """Чекає, поки користувач вручну пройде перевірку.
-
-        Повертається лише коли перевірки немає CHALLENGE_CLEAR_POLLS опитувань поспіль.
-        logged_in_selector тут навмисно НЕ перевіряється: у залогіненого акаунта він видимий
-        і під час перевірки, тож функція поверталася б одразу, не чекаючи користувача.
-        """
+        """Чекає проходження перевірки та автоматично натискає чекбокс Cloudflare Turnstile, якщо він з'явився."""
         self.log(
             "WARN",
             f"account#{account.id}",
-            "Потрібно пройти перевірку у вікні браузера. Після проходження програма продовжить автоматично.",
+            "Виявлено перевірку безпеки — пробуємо автоматично натиснути чекбокс у вікні браузера…",
         )
         if self.config.headless if headed is None else not headed:
             raise LoginError(
-                "Виявлено перевірку сайту. Для ручного проходження потрібно запустити браузер у headed mode (headless=False)."
+                "Виявлено перевірку сайту. Для проходження потрібно запустити браузер у headed mode (headless=False)."
             )
 
         deadline = time.monotonic() + timeout_sec
         clear_polls = 0
+        last_click = 0.0
         while time.monotonic() < deadline:
             if await self._is_bot_check(page):
                 clear_polls = 0
+                if time.monotonic() - last_click >= 8.0:
+                    ts_state = await self._get_turnstile_state(page)
+                    if ts_state.get("present") and not ts_state.get("solved") and ts_state.get("box"):
+                        last_click = time.monotonic()
+                        await self._try_click_turnstile(page, ts_state["box"])
             else:
                 clear_polls += 1
                 if clear_polls >= self.CHALLENGE_CLEAR_POLLS:
                     return
             try:
-                await page.wait_for_timeout(1000)
+                await page.wait_for_timeout(500)
             except Exception as exc:
                 if _browser_was_closed(exc):
                     raise LoginError("Браузер закрито під час очікування ручної перевірки") from exc
@@ -1045,12 +1123,33 @@ class Engine:
                     f"позиція в черзі='{queue_pos[:60]}'" + (f"; {notices}" if notices else ""))
 
         async def challenge_frame() -> str | None:
-            """Видимий iframe захисту сайту (Bunny Shield / captcha) — потрібна ручна дія користувача."""
+            """Видимий iframe захисту сайту (Bunny Shield / активна captcha).
+            Ігнорує фоновий значок Google reCAPTCHA v3 та вже розв'язаний Cloudflare Turnstile.
+            """
             try:
+                ts_state = await self._get_turnstile_state(page)
+                if ts_state.get("present"):
+                    return None if ts_state.get("solved") else "cloudflare-turnstile"
                 return await page.evaluate(r"""() => {
-                  const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
-                  const f = [...document.querySelectorAll('iframe[src]')]
-                    .find(f => vis(f) && /shield|challenge|captcha|turnstile|bunny/i.test(f.src));
+                  const isVisibleOnScreen = (e) => {
+                    const style = window.getComputedStyle(e);
+                    if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) return false;
+                    const r = e.getBoundingClientRect();
+                    return r.width > 40 && r.height > 40 && r.bottom > 0 && r.right > 0 && r.top < window.innerHeight && r.left < window.innerWidth;
+                  };
+                  const f = [...document.querySelectorAll('iframe[src]')].find(f => {
+                    if (!isVisibleOnScreen(f)) return false;
+                    const src = f.src || '';
+                    if (/recaptcha/i.test(src)) {
+                      if (/\/anchor/i.test(src)) return false;
+                      const r = f.getBoundingClientRect();
+                      return r.width >= 250 && r.height >= 250;
+                    }
+                    if (/challenges\.cloudflare\.com|turnstile/i.test(src)) {
+                      return false;
+                    }
+                    return /shield|challenge|bunny|hcaptcha/i.test(src);
+                  });
                   return f ? f.src.slice(0, 120) : null;
                 }""")
             except Exception:
@@ -1093,17 +1192,151 @@ class Engine:
             except Exception:
                 return ""
 
-        async def wait_until_added(before: int, timeout_sec: float) -> bool:
-            """Чекає підтвердження. Поки є перевірка або сайт обробляє додавання/чергу — не здаємося (до 15 хв)."""
+        async def recaptcha_error() -> bool:
+            """Визначає, чи сайт повернув помилку reCAPTCHA або банер «Не вдалося завершити операцію. Спробуйте ще раз.»."""
+            try:
+                cur_url = (page.url or "").lower()
+                if "action=add_product" in cur_url:
+                    body_txt = (await page.locator("body").inner_text(timeout=1000)).lower()
+                    if "recaptcha" in body_txt or "спробуйте ще раз" in body_txt or '"success"' in body_txt:
+                        return True
+                if not await pending_state():
+                    has_err_banner = await page.evaluate(r"""() => {
+                        const bodyText = (document.body && document.body.innerText) ? document.body.innerText.toLowerCase() : '';
+                        return bodyText.includes('не вдалося завершити операцію') ||
+                               bodyText.includes('помилка перевірки recaptcha');
+                    }""")
+                    if has_err_banner:
+                        return True
+            except Exception:
+                pass
+            return False
+
+        async def clear_error_banners() -> None:
+            """Прибирає старі банери помилок («Не вдалося завершити операцію»), щоб не плутати з новою спробою."""
+            try:
+                await page.evaluate(r"""() => {
+                    const buyWrap = document.querySelector('#r_buy_intovar');
+                    document.querySelectorAll('div, p, span, td, li').forEach(el => {
+                        if (buyWrap && (el === buyWrap || el.contains(buyWrap))) return;
+                        const t = (el.innerText || '').trim().toLowerCase();
+                        if (t.length > 0 && t.length < 300 && (
+                            t.includes('не вдалося завершити операцію') ||
+                            t.includes('помилка перевірки recaptcha')
+                        )) {
+                            const childHasSame = [...el.children].some(c => {
+                                const ct = (c.innerText || '').trim().toLowerCase();
+                                return ct.includes('не вдалося завершити операцію') || ct.includes('помилка перевірки recaptcha');
+                            });
+                            if (!childHasSame) {
+                                el.remove();
+                            }
+                        }
+                    });
+                }""")
+            except Exception:
+                pass
+
+        async def prepare_human_click(btn, extra_warmup: bool = False) -> None:
+            """Швидка підготовка перед кліком «Купити»: миттєвий клік на 1-й спробі, прогрів на повторних."""
+            try:
+                max_wait_ms = 1200 if extra_warmup else 350
+                await page.evaluate(f"""async () => {{
+                    const hasRecaptchaScript = !!document.querySelector('script[src*="recaptcha"]');
+                    if (hasRecaptchaScript) {{
+                        const start = Date.now();
+                        while (Date.now() - start < {max_wait_ms}) {{
+                            if (window.grecaptcha && typeof window.grecaptcha.execute === 'function') break;
+                            await new Promise(r => setTimeout(r, 50));
+                        }}
+                    }}
+                }}""")
+            except Exception:
+                pass
+            if extra_warmup:
+                try:
+                    await page.mouse.move(random.randint(220, 620), random.randint(200, 480), steps=6)
+                    await btn.hover(timeout=1000)
+                    await page.wait_for_timeout(random.randint(150, 300))
+                except Exception:
+                    pass
+
+        async def wait_until_added(before: int, timeout_sec: float) -> str:
+            """Чекає підтвердження, натискає чекбокс «Підтвердьте, що ви людина», а якщо прогрузка зависла — сигналізує про оновлення."""
             started = time.monotonic()
             deadline = started + timeout_sec
             hard_deadline = started + self.ADD_TO_CART_MAX_WAIT_SEC
             last_note = 0.0
+            ts_first_seen = 0.0
+            last_ts_click = 0.0
+            ts_solved_at = 0.0
+            reclicked_after_solve = False
+            last_status_change = started
+            last_status_snapshot = None
+
             while time.monotonic() < min(deadline, hard_deadline):
                 if await added(before):
-                    return True
+                    return "added"
+
+                ts_state = await self._get_turnstile_state(page)
+                if ts_state.get("present"):
+                    # Банер «Не вдалося завершити операцію» з'являється разом із Turnstile — прибираємо його,
+                    # щоб він не переривав очікування одразу після кліку по чекбоксу.
+                    await clear_error_banners()
+                    if not ts_state.get("solved") and ts_state.get("box"):
+                        ts_solved_at = 0.0
+                        if ts_first_seen == 0.0:
+                            ts_first_seen = time.monotonic()
+                            last_status_change = time.monotonic()
+                        # Натискаємо чекбокс Turnstile не частіше ніж раз на 8 сек (щоб не збивати перевірку і не заважати мишці)
+                        if (time.monotonic() - ts_first_seen) >= 1.2 and (time.monotonic() - last_ts_click) >= 8.0:
+                            last_ts_click = time.monotonic()
+                            last_status_change = time.monotonic()
+                            if await self._try_click_turnstile(page, ts_state.get("box")):
+                                self.log("INFO", source, "Автоматично натиснуто чекбокс «Підтвердьте, що ви людина»…")
+                    elif ts_state.get("solved"):
+                        if ts_solved_at == 0.0:
+                            ts_solved_at = time.monotonic()
+                            last_status_change = time.monotonic()
+                        # Якщо чекбокс пройдено (є токен), але сайт за 0.7 сек ще не відправив запит сам — тиснемо «Купити»!
+                        elif not reclicked_after_solve and (time.monotonic() - ts_solved_at) >= 0.7 and not await pending_state():
+                            reclicked_after_solve = True
+                            last_status_change = time.monotonic()
+                            btn = await self._first_visible_enabled(page, cfg.add_to_cart_selector, 1000)
+                            if btn is not None and not await added(before):
+                                self.log("INFO", source, "Перевірку Cloudflare пройдено — підтверджуємо натисканням «Купити»…")
+                                await clear_error_banners()
+                                try:
+                                    await btn.click()
+                                except Exception:
+                                    pass
+                else:
+                    if (time.monotonic() - started) >= 0.45 and await recaptcha_error():
+                        return "retry_error"
+
                 bot = await self._is_bot_check(page) or bool(await challenge_frame())
-                reason = "перевірка на сторінці" if bot else await pending_state()
+                pending = await pending_state()
+                btn_text = (await self._text(page, "#r_buy_intovar") or "").strip()
+                queue_pos = (await self._text(page, "#cart-queue-position") or "").strip()
+                cur_snapshot = (
+                    btn_text,
+                    queue_pos,
+                    pending or "",
+                    bool(ts_state.get("present")),
+                    bool(ts_state.get("solved")),
+                )
+                if cur_snapshot != last_status_snapshot:
+                    if last_status_snapshot is not None:
+                        last_status_change = time.monotonic()
+                    last_status_snapshot = cur_snapshot
+
+                # Якщо іде прогрузка «Купити» (або очікування) і статус ніяк не змінюється 6 сек — оновлюємо сайт
+                if not bot and (time.monotonic() - last_status_change) >= 6.0:
+                    return "stuck_reload"
+                if ts_state.get("present") and not ts_state.get("solved") and last_ts_click > 0 and (time.monotonic() - last_status_change) >= 10.0:
+                    return "stuck_reload"
+
+                reason = "перевірка на сторінці" if bot else pending
                 if reason:
                     if bot and cfg.headless:
                         raise LoginError("Потрібна ручна перевірка, але браузер у headless-режимі (headless=False).")
@@ -1114,38 +1347,79 @@ class Engine:
                                 " додавання завершиться автоматично.") if bot else ""
                         self.log("WARN", source, f"Очікуємо: {reason}; {await diagnostics(before)}.{hint}")
                 try:
-                    await page.wait_for_timeout(500)
+                    await page.wait_for_timeout(150)
                 except Exception as exc:
                     if _browser_was_closed(exc):
                         raise RuntimeError("Браузер закрито під час очікування додавання в кошик") from exc
                     raise
-            return False
+            return "timeout"
 
         async def click_purchase() -> None:
-            button = await self._first_visible_enabled(
-                page, cfg.add_to_cart_selector, cfg.page_timeout_sec * 1000
-            )
-            if button is None:
-                raise RuntimeError(
-                    f"Не з'явилася active кнопка покупки за селектором "
-                    f"'{cfg.add_to_cart_selector}' на {page.url}"
+            for recaptcha_attempt in range(1, 9):
+                button = await self._first_visible_enabled(
+                    page, cfg.add_to_cart_selector, cfg.page_timeout_sec * 1000
                 )
-            before = await cart_count()
-            if await self._visible(page, self.CART_BUTTON_ADDED_SELECTOR):
-                self.log("INFO", source, "Товар уже в кошику (кнопка «В кошику») — повторно не додаємо")
-                return
-            try:
-                await button.click()
-            except Exception as exc:
-                if _browser_was_closed(exc):
-                    raise RuntimeError(f"Браузер закрито до натискання кнопки покупки на {page.url}") from exc
-                raise RuntimeError(
-                    f"Не вдалося натиснути кнопку покупки '{cfg.add_to_cart_selector}' на {page.url}: {_short(exc)}"
-                ) from exc
+                if button is None:
+                    raise RuntimeError(
+                        f"Не з'явилася active кнопка покупки за селектором "
+                        f"'{cfg.add_to_cart_selector}' на {page.url}"
+                    )
+                before = await cart_count()
+                if await self._visible(page, self.CART_BUTTON_ADDED_SELECTOR):
+                    self.log("INFO", source, "Товар уже в кошику (кнопка «В кошику») — повторно не додаємо")
+                    return
+                await clear_error_banners()
+                await prepare_human_click(button, extra_warmup=(recaptcha_attempt > 1))
+                try:
+                    await button.click()
+                except Exception as exc:
+                    if _browser_was_closed(exc):
+                        raise RuntimeError(f"Браузер закрито до натискання кнопки покупки на {page.url}") from exc
+                    raise RuntimeError(
+                        f"Не вдалося натиснути кнопку покупки '{cfg.add_to_cart_selector}' на {page.url}: {_short(exc)}"
+                    ) from exc
 
-            if await wait_until_added(before, cfg.page_timeout_sec):
-                self.log("INFO", source, "Товар додано в кошик (підтверджено сайтом)")
-                return
+                wait_status = await wait_until_added(before, cfg.page_timeout_sec)
+                if wait_status == "added":
+                    self.log("INFO", source, "Товар додано в кошик (підтверджено сайтом)")
+                    return
+
+                if wait_status == "stuck_reload":
+                    self.log(
+                        "WARN",
+                        source,
+                        f"Прогрузка «Купити» зависла без зміни статусу — оновлюємо сайт ({recaptcha_attempt}/8)…",
+                    )
+                    await page.goto(url, wait_until="domcontentloaded")
+                    await self._handle_product_challenge(page, account, url)
+                    if await self._needs_account_login(page):
+                        await self._login_on_product_page(page, account, url)
+                    if await added(before) or await in_cart_page():
+                        self.log("INFO", source, "Товар уже у кошику після оновлення — повторний клік не потрібен")
+                        return
+                    continue
+
+                # Якщо сайт показав «Не вдалося завершити операцію. Спробуйте ще раз.» або помилку reCAPTCHA:
+                if wait_status == "retry_error" or await recaptcha_error():
+                    on_json_page = "action=add_product" in (page.url or "").lower()
+                    self.log(
+                        "WARN",
+                        source,
+                        f"Сайт відповів «Спробуйте ще раз» — миттєвий повтор ({recaptcha_attempt}/8)…",
+                    )
+                    await clear_error_banners()
+                    if on_json_page or recaptcha_attempt % 2 == 0:
+                        await page.goto(url, wait_until="domcontentloaded")
+                        await self._handle_product_challenge(page, account, url)
+                        if await self._needs_account_login(page):
+                            await self._login_on_product_page(page, account, url)
+                    else:
+                        await page.wait_for_timeout(200)
+                    if await added(before) or await in_cart_page():
+                        self.log("INFO", source, "Товар уже у кошику — повторний клік не потрібен")
+                        return
+                    continue
+                break
 
             # Перед повторним кліком звіряємось із кошиком (AJAX, без переходів): товар міг уже додатись,
             # а повторний клік додав би зайву штуку
@@ -1158,8 +1432,9 @@ class Engine:
             if retry is not None and not await added(before) and not await pending_state() \
                     and not await self._is_bot_check(page) and not await challenge_frame():
                 self.log("INFO", source, "Підтвердження немає — повторюємо натискання «Купити» один раз")
+                await prepare_human_click(retry, extra_warmup=True)
                 await retry.click()
-                if await wait_until_added(before, cfg.page_timeout_sec):
+                if (await wait_until_added(before, cfg.page_timeout_sec)) == "added":
                     self.log("INFO", source, "Товар додано в кошик (підтверджено сайтом)")
                     return
 
