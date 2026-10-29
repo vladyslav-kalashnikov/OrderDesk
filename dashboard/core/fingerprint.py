@@ -26,6 +26,11 @@ CHROME_STEALTH_ARGS: list[str] = [
     "--webrtc-ip-handling-policy=disable_non_proxied_udp",
     "--enforce-webrtc-ip-permission-check",
     "--force-webrtc-ip-handling-policy",
+    # Багато вікон одночасно: не дозволяємо Chrome «присипляти» фонові/перекриті вікна (інакше таймери й капча гальмують)
+    "--disable-background-timer-throttling",
+    "--disable-renderer-backgrounding",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-features=CalculateNativeWinOcclusion",
 ]
 
 # Реалістичні конфігурації екранів (viewport_w, viewport_h, screen_w, screen_h, scale)

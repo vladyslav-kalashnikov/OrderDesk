@@ -70,10 +70,10 @@ class SiteConfig:
 
     # Поведінка
     headless: bool = False
-    max_concurrency: int = 4
+    max_concurrency: int = 8
     page_timeout_sec: int = 30
     max_errors_in_row: int = 5
-    drop_start_time: str = ""
+    drop_start_time: str = "09:59:00"
 
     # Telegram
     telegram_enabled: bool = False

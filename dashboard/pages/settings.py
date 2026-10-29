@@ -97,6 +97,9 @@ HINTS = {
     "orders_sync_minutes": "Як часто оновлювати замовлення з кабінету. 0 — лише вручну.",
     "headless": "Увімкнено — браузер працює невидимо. Тоді ПРОЙТИ перевірку безпеки сайту неможливо, "
                 "тому для купівлі лишайте вимкненим.",
+    "drop_start_time": "Якщо запустити завдання раніше (наприклад о 09:00), бот одразу увійде в акаунт, "
+                       "підтримуватиме сесію активною і почне активно оновлювати сторінку рівно о вказаній годині (напр. 09:59:00). "
+                       "Залиште порожнім, щоб оновлювати одразу після запуску.",
 }
 INT_FIELDS = [
     ("max_concurrency", "Одночасних перевірок", 1, 32),
@@ -158,6 +161,13 @@ class SettingsPage(Page):
             spin.setRange(low, high)
             self._inputs[name] = spin
             form.addRow(self._label(label), self._with_hint(spin, HINTS.get(name, "")))
+        self.drop_start_time = QLineEdit()
+        self.drop_start_time.setPlaceholderText("09:59:00 (або порожньо — без очікування)")
+        self._inputs["drop_start_time"] = self.drop_start_time
+        form.addRow(
+            self._label("Старт оновлень (ГГ:ХХ:СС)"),
+            self._with_hint(self.drop_start_time, HINTS["drop_start_time"]),
+        )
         behaviour.add_widget(self._wrap(form))
         column.addWidget(behaviour)
 
