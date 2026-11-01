@@ -79,9 +79,9 @@ class Engine:
     CHALLENGE_CLEAR_POLLS = 3                   # стільки секунд поспіль без перевірки = справді пройдено
     TURNSTILE_CLICK_DELAY_SEC = 0.5             # пауза після появи рамки Turnstile перед кліком по галочці
     TURNSTILE_RETRY_CLICK_SEC = 1.5             # повторний клік по галочці (БЕЗ кліку «Купити»)
-    TURNSTILE_CONFIRM_CLICK_SEC = 3.5           # через 3.5с після галочки, якщо сайт завис — розблоковуємо і дотискаємо «Купити»
+    TURNSTILE_CONFIRM_CLICK_SEC = 8.0           # дотискаємо «Купити» за часом ЛИШЕ через 8с після галочки (повільні ПК/проксі розв'язують довше 4с)
     UNSTICK_YELLOW_SEC = 2.0                    # якщо кнопка зависла на «Очікування» без черги/капчі — розблоковуємо і тиснемо на місці
-    STUCK_AFTER_TURNSTILE_SEC = 6.0             # якщо і після дотискання сайт висить — оновлюємо сторінку через 6 сек
+    STUCK_AFTER_TURNSTILE_SEC = 14.0            # якщо і після дотискання сайт висить — оновлюємо сторінку через 14 сек
     STUCK_WITHOUT_TURNSTILE_SEC = 5.0           # через скільки сек зависання без галочки/черги оновлюємо сайт
     GREEN_IDLE_RECLICK_SEC = 2.5                # якщо кнопка зелена і нічого не відбувається стільки сек — повторний клік без оновлення
     RECLICK_GREEN_MIN_WAIT_SEC = 1.5            # пауза перед reclick_green, щоб Turnstile встиг прогрузитися навіть через повільний проксі
@@ -494,7 +494,7 @@ class Engine:
                     return False
                 box = state["box"]
             # Чекбокс у віджеті Cloudflare Turnstile (300x65) розташований за ~28px від лівого краю по центру висоти
-            click_x = box["x"] + 35 + random.uniform(-2.0, 2.0)
+            click_x = box["x"] + 30 + random.uniform(-1.5, 1.5)
             click_y = box["y"] + (box["height"] / 2.0) + random.uniform(-2.0, 2.0)
             await page.mouse.move(click_x, click_y, steps=random.randint(3, 5))
             await page.wait_for_timeout(random.randint(10, 20))
