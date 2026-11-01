@@ -53,6 +53,7 @@ def main() -> int:
     # Fusion однаково виглядає на всіх ОС і коректно слухається QSS
     app.setStyle("Fusion")
     from PySide6.QtCore import QSettings
+
     from . import theme
     saved = QSettings(APP_NAME, APP_NAME)
     theme.set_mode(str(saved.value("theme", "dark")))

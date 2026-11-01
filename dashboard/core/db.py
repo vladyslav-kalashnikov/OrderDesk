@@ -6,10 +6,23 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from ..models import (
-    DailyStats, Delivery, HistoryEvent, Order, OrderStatus, Product, Recipient,
+    DailyStats,
+    Delivery,
+    HistoryEvent,
+    Order,
+    OrderStatus,
+    Product,
+    Recipient,
 )
 from .entities import (
-    Account, AccountStatus, CartItem, LogEntry, Proxy, ProxyStatus, Task, TaskStatus,
+    Account,
+    AccountStatus,
+    CartItem,
+    LogEntry,
+    Proxy,
+    ProxyStatus,
+    Task,
+    TaskStatus,
 )
 
 SCHEMA = """

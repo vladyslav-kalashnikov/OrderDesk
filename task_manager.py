@@ -8,18 +8,33 @@ import random
 import sys
 
 try:
-    from PySide6.QtCore import QObject, QThread, Qt, Signal
+    from PySide6.QtCore import QObject, Qt, QThread, Signal
     from PySide6.QtGui import QColor
     from PySide6.QtWidgets import (
-        QApplication, QHBoxLayout, QHeaderView, QMainWindow, QPushButton,
-        QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+        QApplication,
+        QHBoxLayout,
+        QHeaderView,
+        QMainWindow,
+        QPushButton,
+        QTableWidget,
+        QTableWidgetItem,
+        QVBoxLayout,
+        QWidget,
     )
 except ImportError:
-    from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal as Signal
+    from PyQt6.QtCore import QObject, Qt, QThread
+    from PyQt6.QtCore import pyqtSignal as Signal
     from PyQt6.QtGui import QColor
     from PyQt6.QtWidgets import (
-        QApplication, QHBoxLayout, QHeaderView, QMainWindow, QPushButton,
-        QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+        QApplication,
+        QHBoxLayout,
+        QHeaderView,
+        QMainWindow,
+        QPushButton,
+        QTableWidget,
+        QTableWidgetItem,
+        QVBoxLayout,
+        QWidget,
     )
 
 COL_ID, COL_STATUS, COL_LOG = range(3)

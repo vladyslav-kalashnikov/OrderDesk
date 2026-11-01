@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from test_cart_scenarios import FakePage  # noqa: E402
+
 from dashboard.core import paths  # noqa: E402
 from dashboard.core.db import Database  # noqa: E402
 from dashboard.core.engine import Engine  # noqa: E402

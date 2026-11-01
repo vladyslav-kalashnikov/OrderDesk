@@ -1,6 +1,4 @@
 """Тести інтеграції з антидетект-браузером AdsPower."""
-import tempfile
-from pathlib import Path
 import asyncio
 import tempfile
 from pathlib import Path
@@ -8,7 +6,6 @@ from unittest.mock import patch
 
 from dashboard.core.adspower import AdsPowerClient
 from dashboard.core.db import Database
-from dashboard.core.entities import Account
 from dashboard.core.site_config import SiteConfig
 
 

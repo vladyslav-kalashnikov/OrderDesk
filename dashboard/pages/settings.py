@@ -3,7 +3,14 @@ from dataclasses import fields
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
-    QCheckBox, QFormLayout, QLabel, QLineEdit, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
+    QCheckBox,
+    QFormLayout,
+    QLabel,
+    QLineEdit,
+    QScrollArea,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
 )
 
 from ..core.engine import Engine
@@ -365,6 +372,7 @@ class SettingsPage(Page):
 
     def test_adspower(self) -> None:
         import threading
+
         from ..core.adspower import AdsPowerClient
 
         url = self.adspower_url.text().strip() or "http://local.adspower.net:50325"

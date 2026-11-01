@@ -11,8 +11,8 @@ import logging
 from dataclasses import dataclass
 
 import httpx
-from playwright.async_api import Browser, TimeoutError as PlaywrightTimeoutError, async_playwright
-
+from playwright.async_api import Browser, async_playwright
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 # =============================== TEST SETTINGS ===============================
 TARGET_URL = "https://coins.bank.gov.ua/arhistratig-mihajil-c-/p-1126.html"

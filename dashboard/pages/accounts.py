@@ -1,6 +1,12 @@
 """«Акаунти»: email + пароль (у Keychain) + проксі; вхід і збереження сесії."""
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QVBoxLayout,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QLabel,
+    QLineEdit,
+    QVBoxLayout,
 )
 
 from ..core.db import Database

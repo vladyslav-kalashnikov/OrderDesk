@@ -2,8 +2,17 @@
 from datetime import datetime
 
 from .models import (
-    DailyStats, DashboardData, Delivery, HistoryEvent, Order, OrderStatus as S,
-    Product, Recipient, SystemStatus,
+    DailyStats,
+    DashboardData,
+    Delivery,
+    HistoryEvent,
+    Order,
+    Product,
+    Recipient,
+    SystemStatus,
+)
+from .models import (
+    OrderStatus as S,
 )
 
 

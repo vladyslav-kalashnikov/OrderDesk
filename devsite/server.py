@@ -70,7 +70,7 @@ def _format_price(value: int) -> str:
 def page(title: str, body: str, email: str | None) -> bytes:
     user = (
         f'<span class="user-email">{html.escape(email)}</span> · <a id="logout" href="/logout">Вийти</a>'
-        if email else '<a href="/login">Увійти</a>'
+        if email else '<a id="login-link" href="/login">Увійти</a>'
     )
     return f"""<!doctype html><html lang="uk"><head><meta charset="utf-8"><title>{html.escape(title)}</title>
 <style>body{{font-family:system-ui;max-width:720px;margin:24px auto;padding:0 16px}}
@@ -135,11 +135,13 @@ def make_handler(state: ShopState):
                 product = PRODUCTS.get(slug)
                 if not product:
                     return self._send(404, page("404", "<h1>Товар не знайдено</h1>", email))
-                stock = (
-                    f'<form method="post" action="/cart/add/{slug}"><button id="add-to-cart" type="submit">'
-                    'Додати в кошик</button></form>'
-                    if state.in_stock(slug) else '<p class="out-of-stock">Немає в наявності</p>'
-                )
+                if not state.in_stock(slug):
+                    stock = '<p class="out-of-stock">Немає в наявності</p>'
+                elif email:
+                    stock = ('<div id="r_buy_intovar"><form method="post" action="/cart/add/' + slug + '">'
+                             '<button id="add-to-cart" class="buy" type="submit">Додати в кошик</button></form></div>')
+                else:  # як на реальному сайті: без входу замість «Купити» — кнопка «увійти»
+                    stock = '<div id="r_buy_intovar"><a class="buy login" href="/login">Увійдіть, щоб купити</a></div>'
                 body = (f'<h1 class="product-title">{html.escape(product["title"])}</h1>'
                         f'<p class="price">{product["price"]}</p>{stock}')
                 self._send(200, page(product["title"], body, email))

@@ -8,7 +8,8 @@ import re
 from collections.abc import Callable
 from datetime import datetime
 
-from playwright.async_api import Error as PlaywrightError, Locator, Page
+from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import Locator, Page
 
 from ..models import Delivery, HistoryEvent, Order, OrderStatus, Recipient
 from .db import Database

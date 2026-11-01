@@ -1,8 +1,16 @@
 """Ліва бокова панель: навігація, стан системи, статистика за сьогодні, футер."""
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
-    QFrame, QPushButton, QGridLayout, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QScrollArea, QVBoxLayout, QWidget,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
 )
 
 from . import APP_AUTHOR, APP_NAME, APP_VERSION, theme

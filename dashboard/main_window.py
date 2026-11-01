@@ -1,7 +1,17 @@
 """Головне вікно: бокова панель + сторінки; слухає рушій і оновлює дані."""
 from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QSplitter, QStackedWidget, QSystemTrayIcon, QVBoxLayout,
+    QApplication,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QSplitter,
+    QStackedWidget,
+    QSystemTrayIcon,
+    QVBoxLayout,
 )
 
 from . import APP_NAME, theme
@@ -260,7 +270,8 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 if notify_if_latest:
                     from .pages.common import info
-                    QTimer.singleShot(0, lambda: info(self, "Оновлення", f"Не вдалося перевірити оновлення: {exc}"))
+                    err_text = str(exc)
+                    QTimer.singleShot(0, lambda: info(self, "Оновлення", f"Не вдалося перевірити оновлення: {err_text}"))
 
         import threading
         threading.Thread(target=_check, daemon=True).start()

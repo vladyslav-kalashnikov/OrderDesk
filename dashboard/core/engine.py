@@ -14,13 +14,13 @@ import time
 from pathlib import Path
 
 from . import paths
+from .adspower import AdsPowerClient, AdsPowerError
 from .db import Database
 from .entities import Account, AccountStatus, Proxy, ProxyStatus, TaskMode, TaskStatus
+from .fingerprint import CHROME_STEALTH_ARGS, load_or_create_fingerprint
 from .proxy import ProxyManager
 from .secrets import get_secret
 from .site_config import SiteConfig
-from .adspower import AdsPowerClient, AdsPowerError
-from .fingerprint import CHROME_STEALTH_ARGS, load_or_create_fingerprint
 
 
 class LoginError(Exception):
@@ -387,7 +387,7 @@ class Engine:
     async def _sleep_or_stop(stop: asyncio.Event, seconds: float) -> None:
         try:
             await asyncio.wait_for(stop.wait(), timeout=max(0.0, seconds))
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
     def _task_status(self, task_id: int, status: TaskStatus, log: str, *, title: str | None = None,
@@ -672,12 +672,18 @@ class Engine:
         cfg = self.config
         lock = self._account_locks.setdefault(account.id, asyncio.Lock())
         async with lock:
-            try:
-                check_response = await page.goto(cfg.account_check_url, wait_until="domcontentloaded")
-            except Exception as exc:
-                if _browser_was_closed(exc):
-                    raise LoginError(f"Браузер закрито під час перевірки входу ({page.url})") from exc
-                raise LoginError(f"Не вдалося відкрити сторінку перевірки входу {cfg.account_check_url}: {_short(exc)}") from exc
+            check_response = None
+            for goto_try in range(1, 4):
+                try:
+                    check_response = await page.goto(cfg.account_check_url, wait_until="domcontentloaded")
+                    break
+                except Exception as exc:
+                    if _browser_was_closed(exc):
+                        raise LoginError(f"Браузер закрито під час перевірки входу ({page.url})") from exc
+                    if goto_try >= 3:
+                        raise LoginError(f"Не вдалося відкрити сторінку перевірки входу {cfg.account_check_url}: {_short(exc)}") from exc
+                    # Разовий збій мережі/проксі (напр. ERR_EMPTY_RESPONSE) — повторюємо, а не валимо завдання.
+                    await asyncio.sleep(0.4 * goto_try)
             if check_response and check_response.status == 429 and not await self._is_bot_check(page):
                 await self._wait_for_rate_limit_page(page, account)
             if await self._is_bot_check(page):
@@ -969,7 +975,7 @@ class Engine:
         stop.set()
         try:
             await asyncio.wait_for(asyncio.shield(task), self.STOP_GRACE_SEC)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             task.cancel()
         except Exception:
             pass
@@ -1098,6 +1104,31 @@ class Engine:
                         title = await self._text(page, cfg.title_selector)
                         price = await self._text(page, cfg.price_selector)
                 except PWError as exc:
+                    if _browser_was_closed(exc) and not is_adspower:
+                        browser = self._browser
+                        if browser is not None and browser.is_connected():
+                            # Браузер живий, а вкладку закрив користувач — зупиняємось, а не висимо.
+                            self.log("INFO", source, "Вкладку закрито користувачем — завдання зупинено")
+                            result = "stopped"
+                            self._task_status(task_id, TaskStatus.STOPPED, "Вікно браузера закрито")
+                            return
+                        # Браузер впав (краш Chrome): піднімаємо його наново й продовжуємо моніторинг.
+                        self.log("WARN", source, "Браузер завершився аварійно — перезапускаємо…")
+                        errors += 1
+                        if errors >= cfg.max_errors_in_row:
+                            raise RuntimeError(f"{errors} збоїв поспіль: {_short(exc)}") from exc
+                        try:
+                            if context:
+                                try:
+                                    await context.close()
+                                except Exception:
+                                    pass
+                            context = await self._new_context(account, proxy)
+                            page = await context.new_page()
+                        except Exception as restart_exc:
+                            self.log("WARN", source, f"Перезапуск браузера не вдався ({errors}/{cfg.max_errors_in_row}): {_short(restart_exc)}")
+                            await self._sleep_or_stop(stop, 2.0)
+                        continue
                     errors += 1
                     message = f"Збій перевірки {errors}/{cfg.max_errors_in_row}: {_short(exc)}"
                     self.log("WARN", source, message)
@@ -1456,8 +1487,6 @@ class Engine:
             last_note = started - 20.0
             ts_first_seen = 0.0
             ts_click_time = 0.0
-            ts_last_click_time = 0.0
-            ts_clicks_in_attempt = 0
             ts_solved_at = 0.0
             ts_disappeared_at = 0.0
             reclicked_after_solve = False
@@ -1503,8 +1532,6 @@ class Engine:
                         # Натискаємо чекбокс Turnstile ОДИН раз після завантаження рамки (TURNSTILE_CLICK_DELAY_SEC)
                         if ts_click_time == 0.0 and (now - ts_first_seen) >= self.TURNSTILE_CLICK_DELAY_SEC:
                             ts_click_time = now
-                            ts_last_click_time = now
-                            ts_clicks_in_attempt = 1
                             if await self._try_click_turnstile(page, ts_state.get("box")):
                                 self.log("INFO", source, "Автоматично натиснуто чекбокс «Підтвердьте, що ви людина»…")
 
@@ -1911,11 +1938,11 @@ class Engine:
                         context = await self._new_context(account, proxy)
                         page = context.pages[0] if (is_adspower and context.pages) else await context.new_page()
                         await self._ensure_logged_in(page, account)
-                        rows = await fetch_user_orders(page, self.config, lambda m: self.log("INFO", source, m))
+                        rows = await fetch_user_orders(page, self.config, lambda m, source=source: self.log("INFO", source, m))
                     updates: list[tuple] = []
                     new, changed = apply_orders(self.db, account.email, rows,
-                                                lambda m: self.log("INFO", source, m),
-                                                on_change=lambda *u: updates.append(u))
+                                                lambda m, source=source: self.log("INFO", source, m),
+                                                on_change=lambda *u, updates=updates: updates.append(u))
                     for number, status, ttn, old_status in updates:
                         await self._notify_order(number, status, account.email, ttn, old_status)
                     total_new += new

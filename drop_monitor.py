@@ -17,8 +17,8 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import httpx
-from playwright.async_api import Browser, Page, TimeoutError as PlaywrightTimeoutError, async_playwright
-
+from playwright.async_api import Browser, Page, async_playwright
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 # ================================ CONFIGURATION =============================
 # Default: an upcoming NBU product observed on the public catalogue. Replace it

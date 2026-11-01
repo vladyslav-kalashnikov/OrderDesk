@@ -1,12 +1,22 @@
 """«Моніторинг»: завдання (товар × акаунт), Старт/Стоп, статус і лог кожного."""
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
-    QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPlainTextEdit,
+    QPushButton,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
 )
 
 from .. import theme
-
 from ..core.db import Database
 from ..core.engine import Engine
 from ..core.entities import ACTIVE_TASK_STATUSES, TaskMode

@@ -67,6 +67,7 @@ def main() -> int:
     config = SiteConfig(
         base_url=base, login_url=f"{base}/login", account_check_url=f"{base}/account",
         cart_url=f"{base}/cart", ip_check_url=f"{base}/ip", page_timeout_sec=15,
+        login_required_selector="a#login-link",
     )
     config.save()
 
@@ -116,17 +117,21 @@ def main() -> int:
     check(db.account(bad).status == AccountStatus.ERROR.value, "акаунт з невірним паролем позначено «Помилка»")
     check(db.account(good).status == AccountStatus.ACTIVE.value, "робочий акаунт активний")
     check(engine.state_path(good).exists(), "сесію (storage_state) збережено у файл")
-    check(oct(engine.state_path(good).stat().st_mode & 0o777) == "0o600", "файл сесії доступний лише власнику")
+    if engine.state_path(good).exists():
+        check(oct(engine.state_path(good).stat().st_mode & 0o777) == "0o600", "файл сесії доступний лише власнику")
     cart = db.cart_items()
     check(len(cart) == 1 and cart[0].title == "Кросівки Air Runner 42", f"кошик у базі: {[c.title for c in cart]}")
     check(len(socks_hits) > 0, f"трафік ішов через SOCKS5 ({len(socks_hits)} з'єднань)")
     stats = db.daily_stats()
-    check((stats.runs, stats.success, stats.errors) == (4, 2, 1), f"статистика: {stats.runs} запусків, "
+    # Успішні завдання тримають вікно відкритим (finish_run — лише при закритті), тому «успішних» тут ще 0.
+    check((stats.runs, stats.errors) == (4, 1), f"статистика: {stats.runs} запусків, "
           f"{stats.success} успішних, {stats.errors} помилок")
 
     print("Повторний запуск (сесія з файлу, без входу):")
     logins_before = sum("Вхід у призначений акаунт" in e.message for e in db.recent_logs())
     t_again = db.add_task(good, f"{base}/product/hoodie", "monitor", 1)
+    engine.stop_tasks([t_monitor])  # завдання тримає вікно відкритим; два вікна однієї монети заборонені
+    time.sleep(3)
     engine.start_tasks([t_again])
     for _ in range(40):
         if db.task(t_again).status == TaskStatus.DONE.value:
@@ -138,6 +143,10 @@ def main() -> int:
 
     engine.shutdown()
     check(db.traffic_bytes() > 0, f"трафік пораховано: {db.traffic_bytes() / 1024:.1f} KB")
+    if failures:
+        print("Журнал рушія (для діагностики):")
+        for entry in reversed(db.recent_logs()):
+            print(f"    [{entry.level}] {entry.source}: {entry.message}"[:300])
     shop.shutdown()
 
     print("\nРЕЗУЛЬТАТ:", "усе пройшло" if not failures else f"{len(failures)} провалів")

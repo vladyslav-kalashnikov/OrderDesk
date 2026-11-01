@@ -10,7 +10,9 @@ import re
 from collections.abc import Awaitable, Callable
 from urllib.parse import urljoin
 
-from playwright.async_api import Error as PlaywrightError, Page, TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import Page
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from .entities import Account
 from .site_config import SiteConfig
