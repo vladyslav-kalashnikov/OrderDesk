@@ -18,10 +18,8 @@ DEFAULT_REPO = "vladyslav-kalashnikov/OrderDesk"
 
 
 def _ssl_context() -> ssl.SSLContext:
-    try:
-        return ssl._create_unverified_context()
-    except Exception:
-        return ssl.create_default_context()
+    # Завантажений код виконується, тому сертифікат перевіряємо завжди.
+    return ssl.create_default_context()
 
 
 class UpdateManager:
@@ -107,7 +105,12 @@ class UpdateManager:
                 project_root = paths.PROJECT_DIR
 
                 for member in z.infolist():
+                    if not member.filename.startswith(prefix):
+                        continue
                     rel_path = member.filename[len(prefix):]
+                    # Захист від zip-slip: лише відносні шляхи без «..» усередині project_root
+                    if rel_path.startswith(("/", "\\")) or ".." in rel_path.replace("\\", "/").split("/"):
+                        continue
                     # Захист: ніколи не перезаписуємо дані клієнта, базу даних, venv або запущений .bat файл!
                     if (
                         not rel_path

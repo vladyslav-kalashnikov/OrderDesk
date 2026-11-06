@@ -97,6 +97,10 @@ class Engine:
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._running: dict[int, tuple[asyncio.Task, asyncio.Event]] = {}
+        
+        # ФІКС: Блокування для безпечного доступу до словника завдань з різних потоків
+        self._running_lock = threading.Lock() 
+        
         self._account_locks: dict[int, asyncio.Lock] = {}
         self._checkout_locks: dict[int, asyncio.Lock] = {}   # кошик спільний на акаунт → чекаути по черзі
         self._traffic_pending = 0
@@ -151,7 +155,9 @@ class Engine:
             self._submit(self._stop_task(task_id))
 
     def running_task_ids(self) -> set[int]:
-        return set(self._running)
+        # ФІКС: Безпечне читання ключів
+        with self._running_lock:
+            return set(self._running.keys())
 
     def login_account(self, account_id: int, interactive: bool = False) -> concurrent.futures.Future:
         return self._submit(self._login_account(account_id, interactive))
@@ -243,6 +249,11 @@ class Engine:
                 browser = await self._pw.chromium.connect_over_cdp(ws_endpoint)
             except Exception as exc:
                 _log_exception(f"adspower.cdp#{profile_key}", exc)
+                # ФІКС: Закриваємо AdsPower, якщо CDP впав, щоб не плодити зомбі-процеси
+                try:
+                    await self._adspower.stop_browser(profile_key)
+                except Exception:
+                    pass
                 raise AdsPowerError(f"Не вдалося підключитися через CDP до AdsPower: {_short(exc)}") from exc
 
             self._adspower_browsers[profile_key] = (browser, 1)
@@ -489,6 +500,15 @@ class Engine:
         """Плавно наводить курсор і натискає чекбокс «Підтвердьте, що ви людина» у блоці Cloudflare Turnstile."""
         try:
             if not box:
+                # Скролимо до кнопки «Купити», біля якої стоїть Turnstile, ДО обчислення координат:
+                # box — це viewport-координати, після скролу вони б застаріли.
+                try:
+                    btn = page.locator("#r_buy_intovar").first
+                    if await btn.count():
+                        await btn.scroll_into_view_if_needed()
+                        await page.wait_for_timeout(200)
+                except Exception:
+                    pass
                 state = await self._get_turnstile_state(page)
                 if state.get("solved") or not state.get("box"):
                     return False
@@ -553,7 +573,7 @@ class Engine:
             return False
 
     async def _wait_for_manual_challenge(self, page, account: Account, timeout_sec: int = 300,
-                                        headed: bool | None = None) -> None:
+                                         headed: bool | None = None) -> None:
         """Чекає проходження перевірки (Bunny Shield PoW / Cloudflare) та автоматично натискає чекбокс Turnstile."""
         if self.config.headless if headed is None else not headed:
             raise LoginError(
@@ -949,26 +969,28 @@ class Engine:
     # ------------------------------------------------------------- завдання
 
     async def _start_task(self, task_id: int) -> None:
-        if task_id in self._running:
-            return
-        new = self.db.task(task_id)
-        if new:
-            for other_id in list(self._running):
-                other = self.db.task(other_id)
-                if other and other.account_id == new.account_id and other.url == new.url:
-                    message = (f"Цей акаунт уже працює з цією монетою у завданні №{other_id}. Два вікна одного акаунта "
-                               "збивають одне одному перевірку — оберіть для цього завдання ІНШИЙ акаунт.")
-                    self._task_status(task_id, TaskStatus.ERROR, message)
-                    self.log("WARN", f"task#{task_id}", message)
-                    self.events.data_changed("tasks")
-                    return
-        stop = asyncio.Event()
-        task = asyncio.create_task(self._run_task(task_id, stop), name=f"task#{task_id}")
-        self._running[task_id] = (task, stop)
+        with self._running_lock:
+            if task_id in self._running:
+                return
+            new = self.db.task(task_id)
+            if new:
+                for other_id in list(self._running):
+                    other = self.db.task(other_id)
+                    if other and other.account_id == new.account_id and other.url == new.url:
+                        message = (f"Цей акаунт уже працює з цією монетою у завданні №{other_id}. Два вікна одного акаунта "
+                                   "збивають одне одному перевірку — оберіть для цього завдання ІНШИЙ акаунт.")
+                        self._task_status(task_id, TaskStatus.ERROR, message)
+                        self.log("WARN", f"task#{task_id}", message)
+                        self.events.data_changed("tasks")
+                        return
+            stop = asyncio.Event()
+            task = asyncio.create_task(self._run_task(task_id, stop), name=f"task#{task_id}")
+            self._running[task_id] = (task, stop)
         self.events.data_changed("tasks")
 
     async def _stop_task(self, task_id: int) -> None:
-        entry = self._running.get(task_id)
+        with self._running_lock:
+            entry = self._running.get(task_id)
         if not entry:
             return
         task, stop = entry
@@ -987,9 +1009,12 @@ class Engine:
         source = f"task#{task_id}"
         task = self.db.task(task_id)
         account = self.db.account(task.account_id) if task else None
+        
         if not task or not account:
-            self._running.pop(task_id, None)
+            with self._running_lock:
+                self._running.pop(task_id, None)
             return
+            
         proxy = self.db.proxy(account.proxy_id) if account.proxy_id else None
         auto_checkout = task.mode == TaskMode.CART.value and cfg.auto_checkout
         
@@ -998,7 +1023,8 @@ class Engine:
                        " або результат невідомий — перевірте кабінет магазину") + "; повторне не створюємо")
             self._task_status(task_id, TaskStatus.DONE, message)
             self.log("WARN", f"task#{task_id}", message)
-            self._running.pop(task_id, None)
+            with self._running_lock:
+                self._running.pop(task_id, None)
             self.events.data_changed("tasks")
             return
             
@@ -1023,6 +1049,11 @@ class Engine:
                     target_time = datetime.datetime.strptime(drop_time_str, fmt).replace(
                         year=now.year, month=now.month, day=now.day
                     )
+                    
+                    # ФІКС: якщо таймер ставиться ввечері на наступний ранок
+                    if target_time < now:
+                        target_time += datetime.timedelta(days=1)
+                        
                     if target_time > now:
                         self._task_status(task_id, TaskStatus.STARTING, "Первинна перевірка авторизації…")
                         try:
@@ -1080,9 +1111,23 @@ class Engine:
             # ---------------------------------------------
 
             attempt = errors = 0
+            iteration = 0
+            
             while not stop.is_set():
                 attempt += 1
+                iteration += 1
                 started = loop.time()
+                
+                # ФІКС: Запобіжник від витоку пам'яті (Memory Leak) при довгому очікуванні (особливо для AdsPower)
+                if iteration % 300 == 0:
+                    try:
+                        if context:
+                            await context.close()
+                        context = await self._new_context(account, proxy)
+                        page = await context.new_page()
+                        await self._ensure_logged_in(page, account)
+                    except Exception:
+                        pass
                 
                 try:
                     async with self._sem:
@@ -1112,25 +1157,26 @@ class Engine:
                             result = "stopped"
                             self._task_status(task_id, TaskStatus.STOPPED, "Вікно браузера закрито")
                             return
-                        # Браузер впав (краш Chrome): піднімаємо його наново й продовжуємо моніторинг.
-                        self.log("WARN", source, "Браузер завершився аварійно — перезапускаємо…")
-                        errors += 1
-                        if errors >= cfg.max_errors_in_row:
-                            raise RuntimeError(f"{errors} збоїв поспіль: {_short(exc)}") from exc
-                        try:
-                            if context:
-                                try:
-                                    await context.close()
-                                except Exception:
-                                    pass
-                            context = await self._new_context(account, proxy)
-                            page = await context.new_page()
-                        except Exception as restart_exc:
-                            self.log("WARN", source, f"Перезапуск браузера не вдався ({errors}/{cfg.max_errors_in_row}): {_short(restart_exc)}")
-                            await self._sleep_or_stop(stop, 2.0)
-                        continue
+                    # Браузер впав (краш Chrome): піднімаємо його наново й продовжуємо моніторинг.
+                    self.log("WARN", source, "Браузер завершився аварійно — перезапускаємо…")
                     errors += 1
-                    message = f"Збій перевірки {errors}/{cfg.max_errors_in_row}: {_short(exc)}"
+                    if errors >= cfg.max_errors_in_row:
+                        raise RuntimeError(f"{errors} збоїв поспіль: {_short(exc)}") from exc
+                    try:
+                        if context:
+                            try:
+                                await context.close()
+                            except Exception:
+                                pass
+                        context = await self._new_context(account, proxy)
+                        page = await context.new_page()
+                    except Exception as restart_exc:
+                        self.log("WARN", source, f"Перезапуск браузера не вдався ({errors}/{cfg.max_errors_in_row}): {_short(restart_exc)}")
+                        await self._sleep_or_stop(stop, 2.0)
+                    continue
+                errors += 1
+                message = f"Збій перевірки {errors}/{cfg.max_errors_in_row}: {_short(exc)}" if 'exc' in locals() else "" # Prevent UnboundLocalError
+                if not available and 'exc' in locals():
                     self.log("WARN", source, message)
                     self._task_status(task_id, TaskStatus.MONITORING, message, checked=True)
                     if errors >= cfg.max_errors_in_row:
@@ -1224,7 +1270,8 @@ class Engine:
                     except Exception:
                         pass
             self.db.finish_run(run_id, result)
-            self._running.pop(task_id, None)
+            with self._running_lock:
+                self._running.pop(task_id, None)
             self.events.data_changed("stats")
             self.events.data_changed("tasks")
 
@@ -2033,9 +2080,10 @@ class Engine:
     # ------------------------------------------------------- конфіг і вихід
 
     async def _apply_config(self) -> None:
-        if self._running:
-            self.log("INFO", "engine", "Налаштування збережено; браузер і ліміт застосуються після зупинки завдань")
-            return
+        with self._running_lock:
+            if self._running:
+                self.log("INFO", "engine", "Налаштування збережено; браузер і ліміт застосуються після зупинки завдань")
+                return
         self._sem = asyncio.Semaphore(max(24, self.config.max_concurrency))
         self._adspower.base_url = getattr(self.config, "adspower_api_url", "http://local.adspower.net:50325")
         self._adspower.api_key = getattr(self.config, "adspower_api_key", "")
@@ -2045,7 +2093,9 @@ class Engine:
         self.log("INFO", "engine", "Налаштування застосовано")
 
     async def _shutdown(self) -> None:
-        await asyncio.gather(*(self._stop_task(t) for t in list(self._running)), return_exceptions=True)
+        with self._running_lock:
+            running_tasks = list(self._running.keys())
+        await asyncio.gather(*(self._stop_task(t) for t in running_tasks), return_exceptions=True)
         self._flush_traffic()
         for loop_task in (self._flusher, self._orders_loop):
             if loop_task:

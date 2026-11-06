@@ -95,7 +95,7 @@ class CloudConfigDialog(QDialog):
         layout.addWidget(QLabel("Секретний код адміністратора додатку:"))
         self.passcode_input = QLineEdit()
         self.passcode_input.setPlaceholderText("Пароль для відкриття реєстрації новим клієнтам")
-        self.passcode_input.setText(self.auth.config.admin_passcode)
+        self.passcode_input.setEchoMode(QLineEdit.EchoMode.Password)
         layout.addWidget(self.passcode_input)
 
         # GitHub Repo for auto-updates

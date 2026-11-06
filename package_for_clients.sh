@@ -30,7 +30,14 @@ if [ -f "data/site.json" ]; then
     cp data/site.json "$TMP_DIR/data/"
 fi
 if [ -f "data/auth_config.json" ]; then
-    cp data/auth_config.json "$TMP_DIR/data/"
+    # Секрети (admin_passcode, service-role ключ) клієнтам не йдуть
+    python3 - "$TMP_DIR/data/auth_config.json" <<'PY'
+import json, sys
+cfg = json.load(open("data/auth_config.json", encoding="utf-8"))
+cfg.pop("admin_passcode", None)
+cfg.pop("supabase_service_role_key", None)
+json.dump(cfg, open(sys.argv[1], "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+PY
 fi
 
 # Записуємо поточний коміт версії

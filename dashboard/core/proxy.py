@@ -84,6 +84,12 @@ class ProxyManager:
                 return self._forwarders[key][1]
             import pproxy
 
+            # Очищуємо старі форвардери для цього ж proxy.id, якщо змінилися параметри
+            old_keys = [k for k in self._forwarders if k[0] == proxy.id]
+            for k in old_keys:
+                old_server, _ = self._forwarders.pop(k)
+                old_server.close()
+
             port = _free_port()
             # Слухаємо лише loopback: пароля на вході немає, назовні його відкривати не можна
             listener = pproxy.Server(f"http://127.0.0.1:{port}")
