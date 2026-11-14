@@ -15,26 +15,22 @@ class SiteConfig:
     # Вхід
     login_url: str = f"{NBU_BASE}/login.php"
     account_check_url: str = f"{NBU_BASE}/account.php"
-    # Перевірено на публічній формі NBU 05.10.2026.
     email_selector: str = "form[name='login'] input[name='email_address'], input[name='email'], input#email, input#login_popup"
     password_selector: str = "form[name='login'] input[type='password'], input[name='password'], input#password, input#psw_popup"
     submit_selector: str = "form[name='login'] button[type='submit'], form[name='login'] input[type='submit'], button[type='submit'], input[type='submit']"
-    # Неавторизований заголовок має посилання на login.php, авторизований —
-    # на account.php або logoff.php. Це не залежить від тексту чи SVG-іконки.
     login_required_selector: str = "a[href='login.php'][aria-label='Кабінет'], a[href$='/login.php'][aria-label='Кабінет']"
-    # На сторінці товару ця кнопка замінює «Купити», доки акаунт не авторизований.
     purchase_login_required_selector: str = "#r_buy_intovar .buy.login"
     logged_in_selector: str = "a[href='logoff.php'], a[href$='/logoff.php'], a[href='account.php'][aria-label='Кабінет'], a[href$='/account.php'][aria-label='Кабінет'], a[href*='logout'], .account-logout, .user-account-icon, .ty-account-info"
 
-    # Сторінка товару
+    # Сторінка товару (ВАЖЛИВО: без :not(.yellow), бо перша кнопка «КУПИТИ» на НБУ оранжева/жовта!)
     title_selector: str = "h1.product-title, h1.page-header, .product-info h1, h1.ty-mainbox-title, h1"
     price_selector: str = ".product-price, .price, .current-price, .ty-price-num, .ty-price"
-    in_stock_selector: str = "#r_buy_intovar .buy:not(.login), .btn-add-to-cart, button[name='add_to_cart'], #add-to-cart, button[id*='button_cart'], .ty-btn__add-to-cart"
-    add_to_cart_selector: str = "#r_buy_intovar .buy:not(.login), .btn-add-to-cart, button[name='add_to_cart'], #add-to-cart, button[id*='button_cart'], .ty-btn__add-to-cart"
+    in_stock_selector: str = "#r_buy_intovar .buy:not(.login):not(.disabled):not([disabled]), .btn-add-to-cart, button[name='add_to_cart'], #add-to-cart, button[id*='button_cart'], .ty-btn__add-to-cart"
+    add_to_cart_selector: str = "#r_buy_intovar .buy:not(.login):not(.disabled):not([disabled]), .btn-add-to-cart, button[name='add_to_cart'], #add-to-cart, button[id*='button_cart'], .ty-btn__add-to-cart"
 
     # Кошик
-    cart_url: str = f"{NBU_BASE}/cart/"
-    cart_item_selector: str = ".cart-item, .cart-product-row, .basket-item, .ty-cart-content__product-title, .ty-cart-items"
+    cart_url: str = f"{NBU_BASE}/checkout.php"
+    cart_item_selector: str = "#modal_cart_popup .cartContent_body, .cartContent_body, .cart-item, .cart-product-row, .basket-item, .ty-cart-content__product-title, .ty-cart-items"
 
     # Історія замовлень у кабінеті (лише читання)
     orders_url: str = f"{NBU_BASE}/my-orders/"
@@ -54,7 +50,7 @@ class SiteConfig:
     delivery_city: str = "Київ"
     delivery_warehouse: str = "Відділення №1"
 
-    checkout_button_selector: str = ".btn-checkout, a[href*='checkout'], #to-checkout, a.ty-btn__primary, text='ОФОРМИТИ ЗАМОВЛЕННЯ', text='Оформити замовлення'"
+    checkout_button_selector: str = "#modal_cart_popup a, a[href*='checkout'], a[href*='shopping_cart'], .btn-checkout, a:has-text('Оформити замовлення'), button:has-text('Оформити замовлення')"
     city_selector: str = "input[name*='city'], input#shipping_city, input#elm_city, .select2-search__field"
     city_suggestion_selector: str = ".select2-results__option, .autocomplete-suggestion, .pac-item"
     warehouse_selector: str = "input[name*='warehouse'], select#shipping_warehouse, select[name*='warehouse'], .select2-search__field"

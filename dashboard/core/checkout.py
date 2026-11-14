@@ -42,18 +42,15 @@ class CheckoutError(Exception):
 
 
 def check_price_limit(total: int | None, limit: int, dry_run: bool, log: Callable[[str], None]) -> None:
-    """Ліміт ціни. Справжнє замовлення — лише з заданим лімітом і відомою сумою, що в нього вкладається."""
-    if total is not None and limit > 0 and total > limit:
-        raise CheckoutError(f"Сума {total} грн перевищує ліміт {limit} грн — замовлення не оформлюємо")
-    problem = None
-    if limit <= 0:
-        problem = "ліміт ціни не задано (max_order_price)"
-    elif total is None:
-        problem = "не вдалося прочитати суму — перевірте checkout_total_selector / price_selector"
-    if problem:
-        if not dry_run:
-            raise CheckoutError(f"Замовлення заблоковано: {problem}")
-        log(f"Пробний режим: {problem} — справжнє замовлення було б заблоковане")
+    """Ліміт ціни. Якщо ліміт задано (більше 0), застосовуємо його. Інакше — пропускаємо."""
+    # ФІКС 5: Не блокувати, якщо limit <= 0
+    if limit > 0:
+        if total is not None and total > limit:
+            raise CheckoutError(f"Сума {total} грн перевищує ліміт {limit} грн — замовлення не оформлюємо")
+        elif total is None:
+            if not dry_run:
+                raise CheckoutError("Не вдалося прочитати суму, а ліміт задано — безпечне блокування")
+            log("Пробний режим: суму не прочитано (справжнє замовлення було б заблоковане через ліміт)")
 
 
 # Захист від повторного натискання: після першого кліку по кнопці підтвердження сторінка
@@ -151,9 +148,6 @@ async def _handle_autocomplete_selection(page: Page, field_selector: str, value:
         # Специфічний випадаючий список Select2 / dropdown
         elif await _wait_visible(page, ".select2-results__option, .autocomplete-suggestions, .dropdown-menu, .pac-container", 3000):
             await page.locator(".select2-results__option, .autocomplete-suggestions > div, .dropdown-menu > li, .pac-item").first.click()
-        # На звичайному input Enter часто відправляє всю форму checkout до
-        # заповнення відділення та способу оплати. Якщо автопідказки немає,
-        # залишаємо введене значення — сайт сам виконає валідацію на наступному кроці.
     except PlaywrightError as exc:
         raise CheckoutError(f"Не вдалося вибрати '{value}' для '{field_selector}' на {page.url}: {str(exc).splitlines()[0]}") from exc
 
@@ -174,8 +168,6 @@ async def perform_checkout(page: Page, cfg: SiteConfig, log: Callable[[str], Non
 
     # 1. Кошик → «Оформити замовлення»
     log("Перехід до оформлення замовлення…")
-    # На сайті НБУ кошик може бути відкритий модальним вікном на сторінці товару.
-    # У такому разі працюємо з ним без переходу на неіснуючий /cart/.
     cart_already_open = await _wait_visible(page, cfg.cart_item_selector, 1000)
     if not cart_already_open:
         try:
@@ -197,22 +189,16 @@ async def perform_checkout(page: Page, cfg: SiteConfig, log: Callable[[str], Non
     if cfg.checkout_button_selector and await _wait_visible(page, cfg.checkout_button_selector, 5000):
         cart_url = page.url
         await page.locator(cfg.checkout_button_selector).first.click()
-        # wait_for_load_state() повертається одразу, якщо попередня сторінка вже
-        # була завантажена. Тому після кліку очікуємо саме зміну URL; інакше
-        # наступний крок інколи шукає поля доставки ще на сторінці кошика.
         try:
             await page.wait_for_url(lambda url: url != cart_url, timeout=min(wait_ms, 10_000))
             await page.wait_for_load_state("domcontentloaded")
         except PlaywrightTimeoutError:
-            # Деякі магазини відкривають чекаут без зміни URL (SPA). Нижче
-            # все одно перевіряємо наявність реального поля міста.
             pass
 
     # 2. Доставка (Нова Пошта / Укрпошта)
     carrier_label = "Нова Пошта" if carrier == "nova" else "Укрпошта"
     log(f"Доставка ({carrier_label}): {delivery_city}, {delivery_warehouse}")
 
-    # Вибір перевізника на сторінці, якщо є радіокнопки або таби вибору служби доставки
     carrier_selector = (
         "input[value*='nova'], input[id*='nova'], input[value*='np'], label:has-text('Нова пошта'), label:has-text('Нова Пошта')"
         if carrier == "nova"
@@ -307,7 +293,7 @@ async def perform_checkout(page: Page, cfg: SiteConfig, log: Callable[[str], Non
         except PlaywrightTimeoutError:
             pass
 
-        # 7. Обробка результату та пошук посилання на оплату (LiqPay/Portmone/НБУ)
+        # 7. Обробка результату та пошук посилання на оплату
         payment_url = None
         order_number = None
 
@@ -315,7 +301,6 @@ async def perform_checkout(page: Page, cfg: SiteConfig, log: Callable[[str], Non
             payment_url = page.url
             log("Отримано посилання на оплату через редирект")
 
-        # Очікування номера замовлення або посилання на оплату (до 15 сек)
         for _ in range(15):
             if cfg.order_number_selector and await _wait_visible(page, cfg.order_number_selector, 1000):
                 order_number = (await page.locator(cfg.order_number_selector).first.inner_text()).strip()

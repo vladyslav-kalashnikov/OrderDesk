@@ -77,14 +77,14 @@ class Engine:
     CART_PENDING_SELECTOR = "#prodBtnLoadingSpinner, #cart-queue-position, #r_buy_intovar .clicked, #r_buy_intovar .yellow"
     ADD_TO_CART_MAX_WAIT_SEC = 900              # скільки максимум чекаємо чергу/перевірку (15 хв)
     CHALLENGE_CLEAR_POLLS = 3                   # стільки секунд поспіль без перевірки = справді пройдено
-    TURNSTILE_CLICK_DELAY_SEC = 0.5             # пауза після появи рамки Turnstile перед кліком по галочці
+    TURNSTILE_CLICK_DELAY_SEC = 0.35            # пауза після появи рамки Turnstile перед кліком по галочці
     TURNSTILE_RETRY_CLICK_SEC = 1.5             # повторний клік по галочці (БЕЗ кліку «Купити»)
-    TURNSTILE_CONFIRM_CLICK_SEC = 8.0           # дотискаємо «Купити» за часом ЛИШЕ через 8с після галочки (повільні ПК/проксі розв'язують довше 4с)
-    UNSTICK_YELLOW_SEC = 2.0                    # якщо кнопка зависла на «Очікування» без черги/капчі — розблоковуємо і тиснемо на місці
+    TURNSTILE_CONFIRM_CLICK_SEC = 6.0           # примусовий дотиск, якщо кнопка зависла на «Очікування» довше 6с після галочки
+    UNSTICK_YELLOW_SEC = 6.0                    # якщо кнопка зависла на «Очікування» без черги/капчі — розблоковуємо через 6с
     STUCK_AFTER_TURNSTILE_SEC = 14.0            # якщо і після дотискання сайт висить — оновлюємо сторінку через 14 сек
-    STUCK_WITHOUT_TURNSTILE_SEC = 5.0           # через скільки сек зависання без галочки/черги оновлюємо сайт
-    GREEN_IDLE_RECLICK_SEC = 2.5                # якщо кнопка зелена і нічого не відбувається стільки сек — повторний клік без оновлення
-    RECLICK_GREEN_MIN_WAIT_SEC = 1.5            # пауза перед reclick_green, щоб Turnstile встиг прогрузитися навіть через повільний проксі
+    STUCK_WITHOUT_TURNSTILE_SEC = 12.0          # через скільки сек зависання без галочки/черги оновлюємо сайт
+    GREEN_IDLE_RECLICK_SEC = 2.5                # якщо кнопка зелена і нічого не відбувається стільки сек — повторний клік
+    RECLICK_GREEN_MIN_WAIT_SEC = 0.2            # миттєвий клік (0.2с), щойно кнопка після «ОЧІКУВАННЯ» стала зеленою «КУПИТИ»!
 
     def __init__(self, db: Database, events: EngineEvents | None = None):
         self.db = db
@@ -97,10 +97,8 @@ class Engine:
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._running: dict[int, tuple[asyncio.Task, asyncio.Event]] = {}
-        
-        # ФІКС: Блокування для безпечного доступу до словника завдань з різних потоків
-        self._running_lock = threading.Lock() 
-        
+        self._running_lock = threading.Lock()
+
         self._account_locks: dict[int, asyncio.Lock] = {}
         self._checkout_locks: dict[int, asyncio.Lock] = {}   # кошик спільний на акаунт → чекаути по черзі
         self._traffic_pending = 0
@@ -155,9 +153,19 @@ class Engine:
             self._submit(self._stop_task(task_id))
 
     def running_task_ids(self) -> set[int]:
-        # ФІКС: Безпечне читання ключів
         with self._running_lock:
             return set(self._running.keys())
+
+    def busy_account_ids(self) -> set[int]:
+        """ID акаунтів, які прямо зараз виконують активні завдання."""
+        with self._running_lock:
+            running_ids = list(self._running.keys())
+        busy = set()
+        for tid in running_ids:
+            t = self.db.task(tid)
+            if t:
+                busy.add(t.account_id)
+        return busy
 
     def login_account(self, account_id: int, interactive: bool = False) -> concurrent.futures.Future:
         return self._submit(self._login_account(account_id, interactive))
@@ -249,7 +257,6 @@ class Engine:
                 browser = await self._pw.chromium.connect_over_cdp(ws_endpoint)
             except Exception as exc:
                 _log_exception(f"adspower.cdp#{profile_key}", exc)
-                # ФІКС: Закриваємо AdsPower, якщо CDP впав, щоб не плодити зомбі-процеси
                 try:
                     await self._adspower.stop_browser(profile_key)
                 except Exception:
@@ -268,7 +275,8 @@ class Engine:
                 return
             browser, ref_count = self._adspower_browsers[profile_key]
             ref_count -= 1
-            if ref_count <= 0 or close_browser:
+            # ФІКС (Пункти 1, 2, 6): Закриваємо AdsPower лише тоді, коли жодне інше завдання його не тримає (ref_count <= 0)
+            if ref_count <= 0:
                 del self._adspower_browsers[profile_key]
                 try:
                     await browser.close()
@@ -289,7 +297,9 @@ class Engine:
             timeout_ms = self.config.page_timeout_sec * 1000
             context.set_default_timeout(timeout_ms)
             context.set_default_navigation_timeout(timeout_ms)
-            context.on("requestfinished", self._on_request_finished)
+            if not getattr(context, "_orderdesk_hooked", False):
+                context.on("requestfinished", self._on_request_finished)
+                setattr(context, "_orderdesk_hooked", True)
             return context
 
         browser = browser or await self._get_browser()
@@ -308,9 +318,7 @@ class Engine:
         return context
 
     def _clean_state(self, account_id: int):
-        """«Скидання кешу» перед новою сесією: браузер і так стартує з порожнім кешем, а з
-        збереженої сесії лишаємо тільки вхід (cookies); localStorage/sessionStorage і застарілі
-        токени капчі (reCAPTCHA/Turnstile/cf_chl) прибираємо, щоб старий стан не заважав."""
+        """Очищуємо лише застарілі токени капчі, зберігаючи сесійні куки (osCsid) та localStorage."""
         path = self.state_path(account_id)
         try:
             state = json.loads(path.read_text(encoding="utf-8"))
@@ -318,7 +326,10 @@ class Engine:
             state["cookies"] = [c for c in state.get("cookies", [])
                                 if not any(b in (c.get("name") or "").lower() for b in bad)]
             for origin in state.get("origins", []):
-                origin["localStorage"] = []
+                origin["localStorage"] = [
+                    item for item in origin.get("localStorage", [])
+                    if not any(b in item.get("name", "").lower() for b in bad)
+                ]
             return state
         except Exception:
             return str(path)
@@ -362,7 +373,7 @@ class Engine:
 
     @staticmethod
     async def _first_visible_enabled(page, selector: str, timeout_ms: int):
-        """Повертає перший видимий активний збіг, зокрема серед CSS-селекторів через кому."""
+        """Повертає перший видимий активний збіг (ігноруючи стан 'ОЧІКУВАННЯ', 'В КОШИКУ' та 'НЕМАЄ')."""
         from playwright.async_api import Error as PWError
         if not selector:
             return None
@@ -373,12 +384,14 @@ class Engine:
                 for index in range(await locator.count()):
                     candidate = locator.nth(index)
                     if await candidate.is_visible() and await candidate.is_enabled():
-                        return candidate
+                        txt = ((await candidate.inner_text(timeout=500)) or "").strip().upper()
+                        if "ОЧІКУВАННЯ" not in txt and "В КОШИКУ" not in txt and "НЕМАЄ" not in txt:
+                            return candidate
             except PWError:
                 return None
             if time.monotonic() >= deadline:
                 return None
-            await page.wait_for_timeout(min(200, max(1, int((deadline - time.monotonic()) * 1000))))
+            await page.wait_for_timeout(min(100, max(1, int((deadline - time.monotonic()) * 1000))))
 
     @staticmethod
     async def _text(page, selector: str) -> str | None:
@@ -396,9 +409,10 @@ class Engine:
 
     @staticmethod
     async def _sleep_or_stop(stop: asyncio.Event, seconds: float) -> None:
+        # ФІКС (Пункт 8): Підтримка і Python 3.10 (asyncio.TimeoutError), і Python 3.11+ (TimeoutError)
         try:
             await asyncio.wait_for(stop.wait(), timeout=max(0.0, seconds))
-        except TimeoutError:
+        except (TimeoutError, asyncio.TimeoutError):
             pass
 
     def _task_status(self, task_id: int, status: TaskStatus, log: str, *, title: str | None = None,
@@ -406,7 +420,7 @@ class Engine:
         self.db.update_task(task_id, status, log, title=title, checked=checked)
         self.events.task_changed(task_id, status.value, log)
 
-    # ----------------------------------------------------------------- вхід
+    # ----------------------------------------------------------------- вхід та захист від BankID
 
     BOT_CHECK_MARKERS = (
         "captcha",
@@ -437,6 +451,107 @@ class Engine:
         "увага потрібна",
     )
 
+    async def _is_bankid_page(self, page) -> bool:
+        """Визначає, чи перекинуло браузер на сторінку обов'язкової авторизації BankID НБУ (login-bankid.php)."""
+        try:
+            url = (page.url or "").lower()
+            if "login-bankid" in url or "bankid.org.ua" in url or "id.bank.gov.ua" in url:
+                return True
+            if await page.locator("a[href*='bankid'], button:has-text('BankID'), img[src*='bankid']").count() > 0:
+                body = (await page.locator("body").inner_text(timeout=1000)).lower()
+                if "системи bankid нбу" in body or "авторизуватися за допомогою системи bankid" in body:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    async def _dismiss_cookie_banner(self, page) -> None:
+        """Автоматично закриває нижній чорний банер cookie («Дозволити»), щоб він не перекривав елементи."""
+        try:
+            await page.evaluate(r"""() => {
+                const btns = [...document.querySelectorAll('.cc-btn, .cc-allow, button, a')];
+                for (const b of btns) {
+                    const t = (b.innerText || '').trim().toLowerCase();
+                    if (t === 'дозволити' || t === 'allow cookies') {
+                        b.click();
+                        break;
+                    }
+                }
+                document.querySelectorAll('.cc-window, .cc-banner, [aria-label="cookieconsent"]').forEach(el => {
+                    el.style.display = 'none';
+                });
+            }""")
+        except Exception:
+            pass
+
+    async def _try_open_regular_login(self, page) -> bool:
+        """Якщо ми на login-bankid.php, пробує викликати звичайну форму входу або перевірити чи є попап логіну."""
+        await self._dismiss_cookie_banner(page)
+        try:
+            has_popup = await page.evaluate(r"""() => {
+                const inp = document.querySelector("input#login_popup, form[name='login'] input[name='email_address']");
+                if (!inp) return false;
+                let p = inp.closest('.modal, .popup, #modal_login, div[style*="display: none"]');
+                if (p) {
+                    p.style.display = 'block';
+                    p.style.visibility = 'visible';
+                    p.style.opacity = '1';
+                    p.classList.add('in', 'show');
+                }
+                return true;
+            }""")
+            if has_popup and await self._login_form_available(page):
+                return True
+        except Exception:
+            pass
+
+        try:
+            await page.goto(self.config.login_url, wait_until="domcontentloaded")
+            await self._dismiss_cookie_banner(page)
+            if await self._login_form_available(page):
+                return True
+        except Exception:
+            pass
+        return False
+
+    async def _wait_for_bankid_or_login(self, page, account: Account, timeout_sec: int = 300,
+                                        task_id: int | None = None) -> None:
+        """Не дає завданню впасти, якщо сайт НБУ вимагає виключно BankID (login-bankid.php)."""
+        await self._dismiss_cookie_banner(page)
+
+        if await self._try_open_regular_login(page):
+            return
+
+        if self.config.headless:
+            raise LoginError(
+                f"Сайт НБУ перенаправив {account.email} на login-bankid.php (вимагає BankID). "
+                "Увімкніть видимий браузер (headless=False) або оновіть сесію через кнопку «Увійти вручну»."
+            )
+
+        msg = f"Сайт вимагає BankID ({account.email}) — підтвердіть BankID у відкритому вікні браузера…"
+        self.log("WARN", f"account#{account.id}", msg)
+        if task_id is not None:
+            self._task_status(task_id, TaskStatus.LOGIN, msg)
+
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            await self._dismiss_cookie_banner(page)
+            if await self._visible(page, self.config.logged_in_selector):
+                self._mark_active(account)
+                await self._save_session(page.context, account)
+                self.log("INFO", f"account#{account.id}", f"Авторизацію BankID для {account.email} успішно підтверджено!")
+                return
+            if await self._login_form_available(page):
+                return
+            try:
+                await page.wait_for_timeout(500)
+            except Exception as exc:
+                if _browser_was_closed(exc):
+                    raise LoginError("Вікно браузера закрито під час очікування BankID") from exc
+                raise
+
+        raise LoginError(f"Час очікування авторизації BankID для {account.email} вичерпано (5 хв)")
+
     async def _get_turnstile_state(self, page) -> dict:
         """Перевіряє стан РЕАЛЬНО ВИДИМОГО блоку Cloudflare Turnstile на сторінці (300x65 праворуч від кнопки)."""
         try:
@@ -455,7 +570,6 @@ class Engine:
                     const style = window.getComputedStyle(el);
                     if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) return null;
                     const r = el.getBoundingClientRect();
-                    // Віджет Turnstile має фіксований розмір ~300x65 (праворуч або знизу від кнопки «Купити»)
                     if (r.width >= 240 && r.width <= 340 && r.height >= 48 && r.height <= 85 && r.top >= 0 && r.left >= 0) {
                         if (buyRect && buyRect.width > 0 && r.left < buyRect.right - 15 && r.top < buyRect.bottom - 15) {
                             return null;
@@ -500,8 +614,6 @@ class Engine:
         """Плавно наводить курсор і натискає чекбокс «Підтвердьте, що ви людина» у блоці Cloudflare Turnstile."""
         try:
             if not box:
-                # Скролимо до кнопки «Купити», біля якої стоїть Turnstile, ДО обчислення координат:
-                # box — це viewport-координати, після скролу вони б застаріли.
                 try:
                     btn = page.locator("#r_buy_intovar").first
                     if await btn.count():
@@ -513,7 +625,6 @@ class Engine:
                 if state.get("solved") or not state.get("box"):
                     return False
                 box = state["box"]
-            # Чекбокс у віджеті Cloudflare Turnstile (300x65) розташований за ~28px від лівого краю по центру висоти
             click_x = box["x"] + 30 + random.uniform(-1.5, 1.5)
             click_y = box["y"] + (box["height"] / 2.0) + random.uniform(-2.0, 2.0)
             await page.mouse.move(click_x, click_y, steps=random.randint(3, 5))
@@ -528,12 +639,11 @@ class Engine:
     async def _is_bot_check(self, page) -> bool:
         """Визначає повноекранну сторінку перевірки (Cloudflare / Bunny Shield)."""
         try:
-            # 1. Якщо ми вже на справжній сторінці магазину НБУ (є #r_buy_intovar, body[data-page-name] або #cart_counts) —
-            # це 100% НЕ повноекранна сторінка блокування Cloudflare чи Bunny Shield!
             if (
                 await self._visible(page, "#r_buy_intovar")
                 or await page.locator("body[data-page-name]").count() > 0
                 or await self._visible(page, "#cart_counts")
+                or await self._is_bankid_page(page)
             ):
                 return False
 
@@ -591,7 +701,6 @@ class Engine:
             now = time.monotonic()
             if await self._is_bot_check(page):
                 clear_polls = 0
-                # Перевіряємо статус Bunny Shield PoW («Establishing a secure connection...» -> «Submitting...»)
                 try:
                     pow_state = await page.evaluate(r"""() => {
                         const hasPow = !!document.querySelector('body[data-pow], .challenge-footer');
@@ -609,7 +718,6 @@ class Engine:
                             submitting_since = now
                     else:
                         submitting_since = 0.0
-                    # Якщо Bunny Shield завис на Submitting (>3.5с) або крутиться >10с — оновлюємо сторінку, щоб застосувати PoW-cookie
                     if (submitting_since > 0.0 and (now - submitting_since) >= 3.5) or (now - last_pow_reload) >= 10.0:
                         last_pow_reload = now
                         submitting_since = 0.0
@@ -619,7 +727,6 @@ class Engine:
                             pass
                         continue
 
-                # Пишемо WARN у лог лише якщо перевірка триває довше 12 секунд
                 if not warned and (now - started) >= 12.0:
                     warned = True
                     self.log(
@@ -688,10 +795,14 @@ class Engine:
             "Завдання зупинено без повторних запитів. Спробуйте пізніше."
         )
 
-    async def _ensure_logged_in(self, page, account: Account) -> None:
+    async def _ensure_logged_in(self, page, account: Account, task_id: int | None = None) -> None:
         cfg = self.config
         lock = self._account_locks.setdefault(account.id, asyncio.Lock())
         async with lock:
+            if page.url and cfg.base_url in page.url and await self._visible(page, cfg.logged_in_selector):
+                self._mark_active(account)
+                return
+
             check_response = None
             for goto_try in range(1, 4):
                 try:
@@ -702,18 +813,25 @@ class Engine:
                         raise LoginError(f"Браузер закрито під час перевірки входу ({page.url})") from exc
                     if goto_try >= 3:
                         raise LoginError(f"Не вдалося відкрити сторінку перевірки входу {cfg.account_check_url}: {_short(exc)}") from exc
-                    # Разовий збій мережі/проксі (напр. ERR_EMPTY_RESPONSE) — повторюємо, а не валимо завдання.
                     await asyncio.sleep(0.4 * goto_try)
+
+            await self._dismiss_cookie_banner(page)
+
             if check_response and check_response.status == 429 and not await self._is_bot_check(page):
                 await self._wait_for_rate_limit_page(page, account)
             if await self._is_bot_check(page):
                 await self._wait_for_manual_challenge(page, account)
-                if await self._visible(page, cfg.logged_in_selector):
-                    await self._save_session(page.context, account)
-                    return
             if await self._visible(page, cfg.logged_in_selector):
                 self._mark_active(account)
+                await self._save_session(page.context, account)
                 return
+
+            if await self._is_bankid_page(page):
+                await self._wait_for_bankid_or_login(page, account, task_id=task_id)
+                if await self._visible(page, cfg.logged_in_selector):
+                    self._mark_active(account)
+                    await self._save_session(page.context, account)
+                    return
 
             if await self._visible(page, cfg.login_required_selector):
                 self.log("INFO", f"account#{account.id}",
@@ -721,40 +839,52 @@ class Engine:
 
             password = get_secret("account", account.email)
             if not password:
-                raise LoginError("Пароль акаунта не знайдено в Keychain — задайте його в «Акаунтах»")
+                if await self._is_bankid_page(page):
+                    await self._wait_for_bankid_or_login(page, account, task_id=task_id)
+                    return
+                raise LoginError("Пароль акаунта не знайдено в Keychain — задайте його в «Акаунтах» або увійдіть вручну через BankID")
 
             self.log("INFO", f"account#{account.id}", f"Вхід у призначений акаунт: {account.email}")
-            try:
-                login_response = await page.goto(cfg.login_url, wait_until="domcontentloaded")
-            except Exception as exc:
-                raise LoginError(f"Не вдалося відкрити сторінку входу {cfg.login_url}: {_short(exc)}") from exc
+            if not await self._login_form_available(page):
+                try:
+                    login_response = await page.goto(cfg.login_url, wait_until="domcontentloaded")
+                except Exception as exc:
+                    raise LoginError(f"Не вдалося відкрити сторінку входу {cfg.login_url}: {_short(exc)}") from exc
 
-            if login_response and login_response.status == 429 and not await self._is_bot_check(page):
-                await self._wait_for_rate_limit_page(page, account)
-                if await self._visible(page, cfg.logged_in_selector):
-                    await self._save_session(page.context, account)
-                    return
-            elif login_response and login_response.status in (401, 403) and not await self._is_bot_check(page):
-                raise LoginError(
-                    f"Сайт повернув HTTP {login_response.status} на {page.url}; форма входу недоступна "
-                    "(можлива перевірка або заборона доступу). Перевірте сторінку у звичайному браузері."
-                )
+                await self._dismiss_cookie_banner(page)
+
+                if login_response and login_response.status == 429 and not await self._is_bot_check(page):
+                    await self._wait_for_rate_limit_page(page, account)
+                    if await self._visible(page, cfg.logged_in_selector):
+                        await self._save_session(page.context, account)
+                        return
+                elif login_response and login_response.status in (401, 403) and not await self._is_bot_check(page):
+                    raise LoginError(
+                        f"Сайт повернув HTTP {login_response.status} на {page.url}; форма входу недоступна."
+                    )
 
             deadline = time.monotonic() + min(60, max(15, cfg.page_timeout_sec))
             while True:
+                await self._dismiss_cookie_banner(page)
                 if await self._is_bot_check(page):
                     await self._wait_for_manual_challenge(page, account)
                     if await self._visible(page, cfg.logged_in_selector):
                         await self._save_session(page.context, account)
                         return
-                    if not await self._login_form_available(page):
-                        await page.goto(cfg.login_url, wait_until="domcontentloaded")
                 if await self._visible(page, cfg.logged_in_selector):
                     self._mark_active(account)
                     await self._save_session(page.context, account)
                     return
                 if await self._login_form_available(page):
                     break
+                if await self._is_bankid_page(page):
+                    await self._wait_for_bankid_or_login(page, account, task_id=task_id)
+                    if await self._visible(page, cfg.logged_in_selector):
+                        self._mark_active(account)
+                        await self._save_session(page.context, account)
+                        return
+                    if await self._login_form_available(page):
+                        break
                 if time.monotonic() >= deadline:
                     title = ""
                     try:
@@ -771,7 +901,7 @@ class Engine:
                     raise LoginError(
                         f"Форма входу не з'явилася на {page.url}{title_info}; "
                         f"email matches={email_count}, password matches={password_count}. "
-                        "Перевірте селектори, HTTP-доступ і чи не показує сайт сторінку перевірки."
+                        "Якщо сайт вимагає BankID — натисніть «Увійти вручну» в Акаунтах."
                     )
                 await page.wait_for_timeout(250)
 
@@ -801,11 +931,14 @@ class Engine:
                     await self._wait_for_manual_challenge(page, account)
                 raise LoginError(f"Не вдалося відправити форму входу на {page.url}: {_short(exc)}") from exc
 
-            # Очікування підтвердження входу збільшено до 90 секунд для Cloudflare
             deadline = time.monotonic() + min(90, max(10, cfg.page_timeout_sec))
             while time.monotonic() < deadline:
                 if await self._visible(page, cfg.logged_in_selector):
                     break
+                if await self._is_bankid_page(page):
+                    await self._wait_for_bankid_or_login(page, account, task_id=task_id)
+                    if await self._visible(page, cfg.logged_in_selector):
+                        break
                 if await self._is_bot_check(page):
                     await self._wait_for_manual_challenge(page, account)
                     if await self._visible(page, cfg.logged_in_selector):
@@ -834,9 +967,10 @@ class Engine:
         return True
 
     async def _needs_account_login(self, page) -> bool:
-        """True, якщо сторінка товару вимагає входу (форма логіну або кнопка .buy.login замість «Купити»)."""
+        """True, якщо сторінка товару вимагає входу (форма логіну, BankID або кнопка .buy.login замість «Купити»)."""
         return (
-            await self._login_form_available(page)
+            await self._is_bankid_page(page)
+            or await self._login_form_available(page)
             or await self._visible(page, self.config.purchase_login_required_selector)
         )
 
@@ -846,8 +980,9 @@ class Engine:
         cfg = self.config
         if task_id is not None:
             self._task_status(task_id, TaskStatus.LOGIN, f"Сайт вимагає вхід для {account.email}…")
-        await self._ensure_logged_in(page, account)
+        await self._ensure_logged_in(page, account, task_id=task_id)
         await page.goto(product_url, wait_until="domcontentloaded")
+        await self._dismiss_cookie_banner(page)
         await self._handle_product_challenge(page, account, product_url)
 
         auth_deadline = time.monotonic() + min(10, cfg.page_timeout_sec)
@@ -858,7 +993,7 @@ class Engine:
             if time.monotonic() >= auth_deadline:
                 raise LoginError(
                     f"Акаунт не розблокував кнопку покупки на {page.url}; "
-                    "перевірте logged_in_selector та purchase_login_required_selector"
+                    "перевірте, чи пройдена верифікація BankID в акаунті"
                 )
             await page.wait_for_timeout(250)
 
@@ -889,6 +1024,11 @@ class Engine:
         account = self.db.account(account_id)
         if not account:
             return
+        # ФІКС (Пункт 1/6): Захист від втручання в акаунт, на якому вже запущене активне завдання
+        if account.id in self.busy_account_ids():
+            self.log("WARN", f"account#{account.id}", f"{account.email}: акаунт зараз зайнятий активним завданням — зупиніть завдання перед окремим входом")
+            return
+
         proxy = self.db.proxy(account.proxy_id) if account.proxy_id else None
         source = f"account#{account.id}"
         headed = None
@@ -911,19 +1051,18 @@ class Engine:
                     page = await context.new_page()
 
                 await page.goto(self.config.login_url, wait_until="domcontentloaded")
+                await self._dismiss_cookie_banner(page)
                 if await self._is_bot_check(page):
                     await self._wait_for_manual_challenge(page, account, headed=True)
                 if await self._login_form_available(page) and self.config.email_selector:
                     try:
                         await page.locator(self.config.email_selector).first.fill(account.email, timeout=3000)
-
                         password = get_secret("account", account.email)
                         if password and self.config.password_selector:
                             await page.locator(self.config.password_selector).first.fill(password, timeout=3000)
-
                     except Exception as exc:
                         raise LoginError(f"Не вдалося підготувати форму на {page.url}: {_short(exc)}") from exc
-                self.log("INFO", source, f"Відкрито вікно {'AdsPower' if is_adspower else 'браузера'} — завершіть вхід вручну (чекаємо до 5 хв)")
+                self.log("INFO", source, f"Відкрито вікно {'AdsPower' if is_adspower else 'браузера'} — завершіть вхід (зокрема BankID) вручну (чекаємо до 5 хв)")
                 try:
                     await page.locator(self.config.logged_in_selector).first.wait_for(state="visible", timeout=300_000)
                 except Exception as exc:
@@ -997,7 +1136,7 @@ class Engine:
         stop.set()
         try:
             await asyncio.wait_for(asyncio.shield(task), self.STOP_GRACE_SEC)
-        except TimeoutError:
+        except (TimeoutError, asyncio.TimeoutError):
             task.cancel()
         except Exception:
             pass
@@ -1009,15 +1148,15 @@ class Engine:
         source = f"task#{task_id}"
         task = self.db.task(task_id)
         account = self.db.account(task.account_id) if task else None
-        
+
         if not task or not account:
             with self._running_lock:
                 self._running.pop(task_id, None)
             return
-            
+
         proxy = self.db.proxy(account.proxy_id) if account.proxy_id else None
         auto_checkout = task.mode == TaskMode.CART.value and cfg.auto_checkout
-        
+
         if auto_checkout and not cfg.checkout_dry_run and (block := self.db.checkout_block(task_id)):
             message = ("Замовлення по завданню вже оформлено" + (f": №{block['order_number']}" if block["order_number"] else
                        " або результат невідомий — перевірте кабінет магазину") + "; повторне не створюємо")
@@ -1027,14 +1166,14 @@ class Engine:
                 self._running.pop(task_id, None)
             self.events.data_changed("tasks")
             return
-            
+
         run_id = self.db.start_run(task_id)
         result = "error"
         context = None
         page = None
         is_adspower = bool(account and getattr(account, "adspower_id", None))
         loop = asyncio.get_running_loop()
-        
+
         try:
             self._task_status(task_id, TaskStatus.STARTING, "Запуск браузера…")
             context = await self._new_context(account, proxy)
@@ -1049,20 +1188,24 @@ class Engine:
                     target_time = datetime.datetime.strptime(drop_time_str, fmt).replace(
                         year=now.year, month=now.month, day=now.day
                     )
-                    
-                    # ФІКС: якщо таймер ставиться ввечері на наступний ранок
-                    if target_time < now:
+
+                    # ФІКС (Пункт 5): Якщо час старту вже минув сьогодні менш ніж 12 годин тому (наприклад, перезапуск о 10:00:15 після 09:59:25) —
+                    # НЕ переносимо старт на завтра, а стартуємо МИТТЄВО! Переносимо на завтра лише якщо запускаємо ввечері (різниця > 12 годин).
+                    if target_time < now and (now - target_time).total_seconds() > 12 * 3600:
                         target_time += datetime.timedelta(days=1)
-                        
+
                     if target_time > now:
                         self._task_status(task_id, TaskStatus.STARTING, "Первинна перевірка авторизації…")
                         try:
                             async with self._sem:
-                                await self._ensure_logged_in(page, account)
                                 await page.goto(task.url, wait_until="domcontentloaded")
+                                await self._dismiss_cookie_banner(page)
                                 await self._handle_product_challenge(page, account, task.url)
                                 if await self._needs_account_login(page):
-                                    await self._login_on_product_page(page, account, task.url)
+                                    await self._login_on_product_page(page, account, task.url, task_id=task_id)
+                                else:
+                                    self._mark_active(account)
+                                    await self._save_session(context, account)
                         except Exception as auth_err:
                             self.log("WARN", source, f"Первинна перевірка входу: {_short(auth_err)}")
 
@@ -1070,7 +1213,8 @@ class Engine:
                         if target_time > now:
                             total_wait = int((target_time - now).total_seconds())
                             self.log("INFO", source, f"Таймер: авторизовано, чекаємо до {drop_time_str} ({total_wait} сек)")
-                            did_prewarm = False
+                            did_final_prewarm = False
+                            last_prewarm = time.monotonic()
                             while not stop.is_set():
                                 now = datetime.datetime.now()
                                 remain = (target_time - now).total_seconds()
@@ -1082,53 +1226,41 @@ class Engine:
                                     TaskStatus.STARTING,
                                     f"Авторизовано. Старт оновлень о {drop_time_str} (через {mins} хв {secs:02d} с)…",
                                 )
-                                # Підігрів сесії кожні 10 хвилин та за 60 секунд до старту, щоб сесія не вилетіла
-                                if not did_prewarm and 45 <= remain <= 75:
-                                    did_prewarm = True
+                                need_final = (not did_final_prewarm and 40 <= remain <= 60)
+                                need_periodic = (remain > 70 and (time.monotonic() - last_prewarm) >= 60.0)
+                                if need_final or need_periodic:
+                                    if need_final:
+                                        did_final_prewarm = True
+                                    last_prewarm = time.monotonic()
                                     try:
                                         async with self._sem:
                                             await page.goto(task.url, wait_until="domcontentloaded")
+                                            await self._dismiss_cookie_banner(page)
                                             await self._handle_product_challenge(page, account, task.url)
                                             if await self._needs_account_login(page):
-                                                await self._login_on_product_page(page, account, task.url)
+                                                await self._login_on_product_page(page, account, task.url, task_id=task_id)
+                                            else:
+                                                await self._save_session(context, account)
                                     except Exception:
                                         pass
                                     continue
 
-                                sleep_chunk = min(remain, 15.0 if remain <= 90 else 600.0)
-                                await self._sleep_or_stop(stop, min(sleep_chunk, 5.0))
-                                if remain > 90 and int(remain) % 600 < 5:
-                                    try:
-                                        async with self._sem:
-                                            await page.goto(task.url, wait_until="domcontentloaded")
-                                            await self._handle_product_challenge(page, account, task.url)
-                                            if await self._needs_account_login(page):
-                                                await self._login_on_product_page(page, account, task.url)
-                                    except Exception:
-                                        pass
+                                step = 0.2 if remain <= 2.0 else (1.0 if remain <= 15.0 else 5.0)
+                                await self._sleep_or_stop(stop, min(remain, step))
                 except Exception as e:
                     self.log("WARN", source, f"Помилка формату таймера: {e}")
             # ---------------------------------------------
 
             attempt = errors = 0
-            iteration = 0
-            
+
             while not stop.is_set():
                 attempt += 1
-                iteration += 1
                 started = loop.time()
-                
-                # ФІКС: Запобіжник від витоку пам'яті (Memory Leak) при довгому очікуванні (особливо для AdsPower)
-                if iteration % 300 == 0:
-                    try:
-                        if context:
-                            await context.close()
-                        context = await self._new_context(account, proxy)
-                        page = await context.new_page()
-                        await self._ensure_logged_in(page, account)
-                    except Exception:
-                        pass
-                
+
+                available = False
+                title = None
+                price = None
+
                 try:
                     async with self._sem:
                         response = await page.goto(task.url, wait_until="domcontentloaded")
@@ -1138,106 +1270,137 @@ class Engine:
                                 "Завдання зупинено без повторних запитів; спробуйте пізніше."
                             )
 
-                        # Насамперед миттєво перевіряємо, чи вже є активна кнопка «Купити» (0 мс затримки!)
-                        available = await self._visible(page, cfg.in_stock_selector)
+                        await self._dismiss_cookie_banner(page)
+                        available = (
+                            (await self._first_visible_enabled(page, cfg.in_stock_selector, 100)) is not None
+                            or await self._visible(page, self.CART_BUTTON_ADDED_SELECTOR)
+                        )
                         if not available:
                             await self._handle_product_challenge(page, account, task.url)
                             if await self._needs_account_login(page):
                                 await self._login_on_product_page(page, account, task.url, task_id=task_id)
-                            available = await self._visible(page, cfg.in_stock_selector)
+                            available = (
+                                (await self._first_visible_enabled(page, cfg.in_stock_selector, 100)) is not None
+                                or await self._visible(page, self.CART_BUTTON_ADDED_SELECTOR)
+                            )
 
                         title = await self._text(page, cfg.title_selector)
                         price = await self._text(page, cfg.price_selector)
-                except PWError as exc:
-                    if _browser_was_closed(exc) and not is_adspower:
-                        browser = self._browser
-                        if browser is not None and browser.is_connected():
-                            # Браузер живий, а вкладку закрив користувач — зупиняємось, а не висимо.
-                            self.log("INFO", source, "Вкладку закрито користувачем — завдання зупинено")
-                            result = "stopped"
-                            self._task_status(task_id, TaskStatus.STOPPED, "Вікно браузера закрито")
-                            return
-                    # Браузер впав (краш Chrome): піднімаємо його наново й продовжуємо моніторинг.
-                    self.log("WARN", source, "Браузер завершився аварійно — перезапускаємо…")
-                    errors += 1
-                    if errors >= cfg.max_errors_in_row:
-                        raise RuntimeError(f"{errors} збоїв поспіль: {_short(exc)}") from exc
-                    try:
-                        if context:
-                            try:
-                                await context.close()
-                            except Exception:
-                                pass
-                        context = await self._new_context(account, proxy)
-                        page = await context.new_page()
-                    except Exception as restart_exc:
-                        self.log("WARN", source, f"Перезапуск браузера не вдався ({errors}/{cfg.max_errors_in_row}): {_short(restart_exc)}")
-                        await self._sleep_or_stop(stop, 2.0)
-                    continue
-                errors += 1
-                message = f"Збій перевірки {errors}/{cfg.max_errors_in_row}: {_short(exc)}" if 'exc' in locals() else "" # Prevent UnboundLocalError
-                if not available and 'exc' in locals():
-                    self.log("WARN", source, message)
-                    self._task_status(task_id, TaskStatus.MONITORING, message, checked=True)
-                    if errors >= cfg.max_errors_in_row:
-                        raise RuntimeError(f"{errors} збоїв поспіль: {_short(exc)}") from exc
-                else:
-                    errors = 0
-                    if available:
-                        payment_url = None
-                        if task.mode == TaskMode.CART.value:
-                            if auto_checkout:
-                                self._check_product_price(price)
-                            self._task_status(task_id, TaskStatus.ADDING, "Товар з'явився — додаємо в кошик…", title=title)
-                            for add_try in range(1, 4):
-                                try:
-                                    await self._add_to_cart(page, task.id, task.url, account, title, price)
-                                    break
-                                except (LoginError, asyncio.CancelledError):
-                                    raise
-                                except Exception as add_exc:
-                                    if _browser_was_closed(add_exc) or add_try >= 3 or stop.is_set():
-                                        raise
-                                    self.log("WARN", source,
-                                             f"Спроба додавання {add_try}/3 не вдалася ({_short(add_exc)[:80]}) — "
-                                             "починаємо спочатку зі свіжої сторінки…")
-                                    try:
-                                        await page.goto(task.url, wait_until="domcontentloaded")
-                                        await self._handle_product_challenge(page, account, task.url)
-                                    except Exception as nav_exc:
-                                        if _browser_was_closed(nav_exc):
-                                            raise
-                            outcome = "Додано в кошик"
-                            headline = "🛒 Товар додано в кошик"
-                            if auto_checkout:
-                                self._task_status(task_id, TaskStatus.CHECKOUT, "Оформлюємо замовлення…", title=title)
-                                checkout = await self._checkout(page, task.id, account)
-                                if checkout["dry_run"]:
-                                    outcome = "Додано в кошик, пробний чекаут пройдено"
-                                else:
-                                    outcome = f"Замовлення №{checkout['order_number']} оформлено"
-                                    headline = f"✅ Замовлення №{checkout['order_number']} оформлено"
-                                    payment_url = checkout["payment_url"]
-                        else:
-                            outcome = "Товар у наявності"
-                            headline = "🔔 Товар з'явився в наявності"
-                        message = f"{outcome}: {title or task.url}" + (f" ({price})" if price else "")
-                        self._task_status(task_id, TaskStatus.DONE, message, title=title, checked=True)
-                        self.log("INFO", source, message)
-                        await self._notify_product(headline, title or task.url, price, account, task.url, payment_url)
-                        result = "success"
 
-                        # Якщо режим тільки додавання в кошик — залишаємо вікно відкритим для ручного оформлення
-                        if not auto_checkout:
-                            self.log("INFO", source, "Товар додано в кошик! Вікно браузера залишено відкритим для ручного оформлення.")
+                    errors = 0
+
+                except PWError as exc:
+                    errors += 1
+                    if _browser_was_closed(exc):
+                        if not is_adspower:
+                            browser = self._browser
+                            if browser is not None and browser.is_connected():
+                                self.log("INFO", source, "Вкладку закрито користувачем — завдання зупинено")
+                                result = "stopped"
+                                self._task_status(task_id, TaskStatus.STOPPED, "Вікно браузера закрито")
+                                return
+                        self.log("WARN", source, "Браузер або контекст закрито — перезапускаємо…")
+                        try:
+                            # ФІКС (Пункт 2): Коректне звільнення AdsPower-лічильника та закриття лише не-AdsPower контексту
+                            if is_adspower:
+                                if page:
+                                    try:
+                                        await page.close()
+                                    except Exception:
+                                        pass
+                                await self._release_adspower_browser(account)
+                            elif context:
+                                try:
+                                    await context.close()
+                                except Exception:
+                                    pass
+                            context = await self._new_context(account, proxy)
+                            page = await context.new_page()
+                        except Exception as restart_exc:
+                            self.log("WARN", source, f"Перезапуск не вдався ({errors}/{cfg.max_errors_in_row}): {_short(restart_exc)}")
+                            await self._sleep_or_stop(stop, 2.0)
+                    else:
+                        message = f"Збій завантаження (таймаут) {errors}/{cfg.max_errors_in_row}: {_short(exc)}"
+                        self.log("WARN", source, message)
+                        self._task_status(task_id, TaskStatus.MONITORING, message, checked=True)
+
+                    if errors >= cfg.max_errors_in_row:
+                        raise RuntimeError(f"{errors} збоїв поспіль: {_short(exc)}") from exc
+
+                    await self._sleep_or_stop(stop, 1.5)
+                    continue
+
+                if available:
+                    payment_url = None
+                    if task.mode == TaskMode.CART.value:
+                        if auto_checkout:
+                            self._check_product_price(price)
+                        self._task_status(task_id, TaskStatus.ADDING, "Товар з'явився — додаємо в кошик…", title=title)
+                        for add_try in range(1, 4):
                             try:
-                                while not stop.is_set() and not page.is_closed():
-                                    await asyncio.sleep(1)
+                                await self._add_to_cart(page, task.id, task.url, account, title, price)
+                                break
+                            except (LoginError, asyncio.CancelledError):
+                                raise
+                            except Exception as add_exc:
+                                if _browser_was_closed(add_exc) or add_try >= 3 or stop.is_set():
+                                    raise
+                                self.log("WARN", source,
+                                         f"Спроба додавання {add_try}/3 не вдалася ({_short(add_exc)[:80]}) — "
+                                         "починаємо спочатку зі свіжої сторінки…")
+                                try:
+                                    await page.goto(task.url, wait_until="domcontentloaded")
+                                    await self._handle_product_challenge(page, account, task.url)
+                                except Exception as nav_exc:
+                                    if _browser_was_closed(nav_exc):
+                                        raise
+                        outcome = "Додано в кошик"
+                        headline = "🛒 Товар додано в кошик"
+                        if auto_checkout:
+                            self._task_status(task_id, TaskStatus.CHECKOUT, "Оформлюємо замовлення…", title=title)
+                            checkout = await self._checkout(page, task.id, account)
+                            if checkout["dry_run"]:
+                                outcome = "Додано в кошик, пробний чекаут пройдено"
+                            else:
+                                outcome = f"Замовлення №{checkout['order_number']} оформлено"
+                                headline = f"✅ Замовлення №{checkout['order_number']} оформлено"
+                                payment_url = checkout["payment_url"]
+                        else:
+                            # Автоматично натискаємо зелену кнопку «Оформити замовлення» у верхній плашці
+                            try:
+                                checkout_sel = (
+                                    "#modal_cart_popup a[href*='checkout'], "
+                                    "#modal_cart_popup .btn-success, "
+                                    "a:has-text('Оформити замовлення'), "
+                                    "button:has-text('Оформити замовлення'), "
+                                    "a[href*='checkout.php']"
+                                )
+                                checkout_btn = await self._first_visible_enabled(page, checkout_sel, 3000)
+                                if checkout_btn is not None:
+                                    await checkout_btn.click()
                             except Exception:
                                 pass
-                        return
-                    self._task_status(task_id, TaskStatus.MONITORING,
-                                      f"Спроба #{attempt}: немає в наявності", title=title, checked=True)
+                    else:
+                        outcome = "Товар у наявності"
+                        headline = "🔔 Товар з'явився в наявності"
+
+                    message = f"{outcome}: {title or task.url}" + (f" ({price})" if price else "")
+                    self._task_status(task_id, TaskStatus.DONE, message, title=title, checked=True)
+                    self.log("INFO", source, message)
+                    await self._notify_product(headline, title or task.url, price, account, task.url, payment_url)
+                    result = "success"
+
+                    if not auto_checkout:
+                        self.log("INFO", source, "Товар додано в кошик! Вікно браузера залишено відкритим для оформлення.")
+                        try:
+                            while not stop.is_set() and not page.is_closed():
+                                await asyncio.sleep(1)
+                        except Exception:
+                            pass
+                    return
+
+                self._task_status(task_id, TaskStatus.MONITORING,
+                                  f"Спроба #{attempt}: немає в наявності", title=title, checked=True)
                 await self._sleep_or_stop(stop, task.interval_sec - (loop.time() - started))
 
             result = "stopped"
@@ -1277,13 +1440,7 @@ class Engine:
 
     async def _add_to_cart(self, page, task_id: int, url: str, account: Account,
                            title: str | None, price: str | None) -> None:
-        """Натискає «Купити» і чекає підтвердження, що товар справді в кошику.
-
-        Сайт НБУ сам доводить додавання до кінця (prepare_buy -> add_product), зокрема після
-        ручного проходження перевірки/черги, тому повторно кнопку не тиснемо одразу.
-        Підтвердженням вважається будь-що з: лічильник #cart_counts виріс, у модальному кошику
-        (#modal_cart_popup) з'явився товар, або кнопка на сторінці товару стала посиланням на кошик.
-        """
+        """Натискає «Купити» (спочатку оранжеву для запуску Turnstile, потім зелену для додавання в кошик)."""
         cfg = self.config
         source = f"account#{account.id}"
 
@@ -1314,15 +1471,16 @@ class Engine:
             return await self._text(page, self.QUEUE_MODAL_TEXT_SELECTOR)
 
         async def pending_state() -> str | None:
-            """Сайт ще обробляє додавання (спінер/черга/повідомлення) — треба просто чекати."""
-            if await self._visible(page, self.CART_PENDING_SELECTOR):
+            btn_info = await buy_button_state()
+            if btn_info.get("is_yellow"):
+                return "сайт обробляє додавання (черга/очікування)"
+            if await self._visible(page, "#prodBtnLoadingSpinner, #cart-queue-position"):
                 return "сайт обробляє додавання (черга/очікування)"
             if message := await queue_message():
                 return f"повідомлення сайту: {message}"
             return None
 
         async def page_notices() -> str:
-            """Видимі повідомлення сайту (alert/модальні вікна) та iframe перевірки — для діагностики."""
             try:
                 data = await page.evaluate(r"""() => {
                   const vis = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
@@ -1351,9 +1509,6 @@ class Engine:
                     f"позиція в черзі='{queue_pos[:60]}'" + (f"; {notices}" if notices else ""))
 
         async def challenge_frame() -> str | None:
-            """Видимий iframe захисту сайту (Bunny Shield / активна captcha).
-            Ігнорує фоновий значок Google reCAPTCHA v3 та вже розв'язаний Cloudflare Turnstile.
-            """
             try:
                 ts_state = await self._get_turnstile_state(page)
                 if ts_state.get("present"):
@@ -1386,9 +1541,6 @@ class Engine:
         cart_html_holder: list[str] = []
 
         async def in_cart_page() -> bool:
-            """Перевірка без переходів між сторінками: той самий AJAX-запит, яким сайт сам будує вікно кошика.
-            (Окремої сторінки кошика на сайті НБУ немає: shopping_cart.php віддає 404, а перехід на нову
-            адресу ще й викликає перевірку захисту.)"""
             match = re.search(r"p-(\d+)\.html", url)
             product_id = match.group(1) if match else None
             try:
@@ -1405,7 +1557,6 @@ class Engine:
             return product_id is not None and f"p-{product_id}.html" in html
 
         async def save_debug() -> str:
-            """Скріншот і розмітка кнопки при невдачі — щоб бачити, що саме було на екрані."""
             try:
                 folder = paths.sessions_dir().parent / "debug"
                 folder.mkdir(parents=True, exist_ok=True)
@@ -1421,7 +1572,6 @@ class Engine:
                 return ""
 
         async def recaptcha_redirect_error() -> bool:
-            """True лише якщо браузер перекинуло на окрему JSON-сторінку помилки action=add_product."""
             try:
                 cur_url = (page.url or "").lower()
                 if "action=add_product" in cur_url:
@@ -1433,7 +1583,6 @@ class Engine:
             return False
 
         async def has_error_banner() -> bool:
-            """True, якщо на сторінці є банер «Не вдалося завершити операцію» або «Помилка перевірки reCAPTCHA»."""
             try:
                 if await pending_state():
                     return False
@@ -1446,7 +1595,6 @@ class Engine:
                 return False
 
         async def clear_error_banners() -> None:
-            """Прибирає старі банери помилок («Не вдалося завершити операцію») і ховає cookie-банер."""
             try:
                 await page.evaluate(r"""() => {
                     const buyWrap = document.querySelector('#r_buy_intovar');
@@ -1474,7 +1622,6 @@ class Engine:
                 pass
 
         async def unstick_buy_button() -> None:
-            """Знімає завислий стан «Очікування» (.yellow, .clicked, disabled, спінер) із кнопки #r_buy_intovar прямо на сторінці."""
             try:
                 await page.evaluate(r"""() => {
                     const wrap = document.querySelector('#r_buy_intovar');
@@ -1497,7 +1644,10 @@ class Engine:
                 pass
 
         async def buy_button_state() -> dict:
-            """Перевіряє стан кнопки #r_buy_intovar: чи вона жовта/в очікуванні, чи знову стала зеленою й активною."""
+            """Точно розрізняє:
+            1) is_yellow (стан 'ОЧІКУВАННЯ' або спінер),
+            2) is_green_ready (зелена кнопка 'КУПИТИ' після проходження перевірки — готова до другого кліку!).
+            """
             try:
                 return await page.evaluate(r"""() => {
                     const wrap = document.querySelector('#r_buy_intovar');
@@ -1509,38 +1659,35 @@ class Engine:
                         return { exists: false, is_yellow: false, is_green_ready: false, text: '' };
                     }
                     const text = (btn.innerText || btn.textContent || '').trim().toUpperCase();
-                    const cls = ((btn.className || '') + ' ' + (wrap.className || '')).toLowerCase();
                     const spinner = document.querySelector('#prodBtnLoadingSpinner');
                     const spinnerVis = !!(spinner && (spinner.offsetWidth || spinner.offsetHeight || spinner.getClientRects().length));
                     let isYellowColor = false;
+                    let isGreenColor = false;
                     const m = (style.backgroundColor || '').match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
                     if (m) {
-                        const r = parseInt(m[1], 10), g = parseInt(m[2], 10);
+                        const r = parseInt(m[1], 10), g = parseInt(m[2], 10), b = parseInt(m[3], 10);
                         if (r > 180 && r > g + 20) isYellowColor = true;
+                        if (g > 100 && g > r + 20) isGreenColor = true;
                     }
-                    const is_yellow = cls.includes('yellow') || cls.includes('clicked') || text.includes('ОЧІКУВАННЯ') || spinnerVis || isYellowColor;
-                    const is_green_ready = !btn.disabled && !is_yellow && !text.includes('В КОШИКУ');
-                    return { exists: true, is_yellow, is_green_ready, text };
+                    const is_waiting = text.includes('ОЧІКУВАННЯ') || spinnerVis;
+                    const is_green_ready = !btn.disabled && !is_waiting && !text.includes('В КОШИКУ') && (isGreenColor || !isYellowColor);
+                    return { exists: true, is_yellow: is_waiting || (isYellowColor && !isGreenColor), is_green_ready, text };
                 }""")
             except Exception:
                 return {"exists": False, "is_yellow": False, "is_green_ready": False, "text": ""}
 
         async def wait_until_added(before: int, timeout_sec: float) -> str:
-            """Чекає підтвердження, натискає чекбокс «Підтвердьте, що ви людина», дотискає «Купити» та оновлює при зависанні."""
             started = time.monotonic()
             deadline = started + timeout_sec
             hard_deadline = started + self.ADD_TO_CART_MAX_WAIT_SEC
-            # Не показуємо WARN «Очікуємо: сайт обробляє додавання» на 1-й мілісекунді кліку — лише якщо чекаємо >10 сек
             last_note = started - 20.0
             ts_first_seen = 0.0
             ts_click_time = 0.0
             ts_solved_at = 0.0
             ts_disappeared_at = 0.0
             reclicked_after_solve = False
-            reclick_after_solve_time = 0.0
             unstuck_without_ts = False
-            was_yellow = False
-            was_yellow_after_reclick = False
+            was_waiting = False
             last_queue_change = started
             last_queue_pos = ""
             checked_ajax_midway = False
@@ -1550,17 +1697,18 @@ class Engine:
                 if await added(before):
                     return "added"
 
-                # Одноразова фонова перевірка popup_cart.php через 10 сек очікування (щоб не спамити Bunny Shield щосекунди)
                 if not checked_ajax_midway and (now - started) >= 10.0:
                     checked_ajax_midway = True
                     if await in_cart_page():
                         return "added"
 
                 btn_info = await buy_button_state()
-                if btn_info.get("is_yellow"):
-                    was_yellow = True
-                    if reclicked_after_solve:
-                        was_yellow_after_reclick = True
+                if "ОЧІКУВАННЯ" in (btn_info.get("text") or "") or btn_info.get("is_yellow"):
+                    was_waiting = True
+
+                # Щойно кнопка після «ОЧІКУВАННЯ» перетворилася на ЗЕЛЕНУ «КУПИТИ» — миттєво тиснемо її!
+                if was_waiting and btn_info.get("is_green_ready") and not reclicked_after_solve:
+                    return "reclick_green"
 
                 queue_pos = (await self._text(page, "#cart-queue-position") or "").strip()
                 if queue_pos and queue_pos != last_queue_pos:
@@ -1576,7 +1724,6 @@ class Engine:
                     if ts_first_seen == 0.0:
                         ts_first_seen = now
                     if not ts_state.get("solved") and ts_state.get("box"):
-                        # Натискаємо чекбокс Turnstile ОДИН раз після завантаження рамки (TURNSTILE_CLICK_DELAY_SEC)
                         if ts_click_time == 0.0 and (now - ts_first_seen) >= self.TURNSTILE_CLICK_DELAY_SEC:
                             ts_click_time = now
                             if await self._try_click_turnstile(page, ts_state.get("box")):
@@ -1587,63 +1734,38 @@ class Engine:
                 else:
                     if ts_click_time > 0.0 and ts_disappeared_at == 0.0:
                         ts_disappeared_at = now
-                    # Якщо віджета Turnstile ще немає на екрані й ми ще не клікали галочку:
-                    # даємо RECLICK_GREEN_MIN_WAIT_SEC (щоб Turnstile встиг прогрузитися через проксі),
-                    # і лише якщо галочка так і не з'явилася, а кнопка знову зелена або висить банер помилки — тиснемо повторно.
+
                     if (
-                        ts_click_time == 0.0
-                        and btn_info.get("is_green_ready")
+                        btn_info.get("is_green_ready")
                         and (now - started) >= self.RECLICK_GREEN_MIN_WAIT_SEC
-                        and (was_yellow or await has_error_banner())
+                        and (was_waiting or await has_error_banner())
                     ):
                         return "reclick_green"
 
-                # Дотискаємо «Купити» лише якщо:
-                # 1) Turnstile явно вирішено (ts_solved_at), або
-                # 2) віджет Turnstile вже зник після кліку по галочці (ts_disappeared_at), а кнопка зависла на «ОЧІКУВАННЯ», або
-                # 3) минуло TURNSTILE_CONFIRM_CLICK_SEC (7.5с) після кліку по галочці (щоб не перебити повільний проксі на 4-й секунді!).
-                # Сайт відповів помилкою ПІСЛЯ галочки (червоний банер «Не вдалося завершити операцію», кнопка знову
-                # зелена, нічого не очікується) — чекати нема чого: одразу нова спроба, а не 10+ секунд простою.
                 if (
                     ts_click_time > 0.0
-                    and (now - ts_click_time) >= 1.5
+                    and (now - ts_click_time) >= 1.0
                     and not ts_state.get("box")
                     and btn_info.get("is_green_ready")
                     and not queue_pos
-                    and await has_error_banner()
                 ):
                     if await added(before) or await in_cart_page():
                         return "added"
                     return "reclick_green"
 
                 ready_to_confirm = (
-                    (ts_solved_at > 0.0 and (now - ts_solved_at) >= 1.0)
-                    or (ts_disappeared_at > 0.0 and (now - ts_disappeared_at) >= min(1.5, self.TURNSTILE_CONFIRM_CLICK_SEC))
+                    (ts_solved_at > 0.0 and (now - ts_solved_at) >= 0.4)
+                    or (ts_disappeared_at > 0.0 and (now - ts_disappeared_at) >= 0.5)
                     or (ts_click_time > 0.0 and (now - ts_click_time) >= self.TURNSTILE_CONFIRM_CLICK_SEC)
                 )
                 if ready_to_confirm and not reclicked_after_solve and not queue_pos:
                     reclicked_after_solve = True
-                    reclick_after_solve_time = now
                     if await added(before) or await in_cart_page():
                         return "added"
-                    await unstick_buy_button()
-                    btn = await self._first_visible_enabled(page, cfg.add_to_cart_selector, 800)
-                    if btn is not None and not await added(before):
-                        self.log("INFO", source, "Галочку пройдено (кнопка «Очікування» зависла) — розблоковуємо і дотискаємо «Купити»…")
-                        await clear_error_banners()
-                        try:
-                            await btn.click()
-                        except Exception:
-                            pass
-                elif (
-                    reclicked_after_solve
-                    and was_yellow_after_reclick
-                    and btn_info.get("is_green_ready")
-                    and (now - reclick_after_solve_time) >= 2.5
-                ):
+                    if not btn_info.get("is_green_ready"):
+                        await unstick_buy_button()
                     return "reclick_green"
 
-                # Якщо галочки взагалі не було, але кнопка зависла на «ОЧІКУВАННЯ» без черги — розблоковуємо її на місці через 4.5с без перезавантаження!
                 if (
                     ts_click_time == 0.0
                     and not ts_state.get("present")
@@ -1656,24 +1778,15 @@ class Engine:
                     if await added(before) or await in_cart_page():
                         return "added"
                     await unstick_buy_button()
-                    btn = await self._first_visible_enabled(page, cfg.add_to_cart_selector, 800)
-                    if btn is not None and not await added(before):
-                        self.log("INFO", source, "Кнопка зависла на «Очікування» — розблоковуємо та тиснемо «Купити» без оновлення…")
-                        await clear_error_banners()
-                        try:
-                            await btn.click()
-                        except Exception:
-                            pass
+                    return "reclick_green"
 
-                # Якщо після натискання галочки минуло STUCK_AFTER_TURNSTILE_SEC, черга не рухається і сайт просто висить:
                 if ts_click_time > 0.0 and (now - ts_click_time) >= self.STUCK_AFTER_TURNSTILE_SEC and not queue_pos:
                     if await in_cart_page():
                         return "added"
-                    if btn_info.get("is_green_ready") and not was_yellow_after_reclick:
+                    if btn_info.get("is_green_ready"):
                         return "reclick_green"
                     return "stuck_reload"
 
-                # Якщо галочки не було і сайт висить без руху черги:
                 full_page_bot = (await self._is_bot_check(page) or bool(await challenge_frame())) and not ts_state.get("present")
                 if not full_page_bot and ts_click_time == 0.0 and not ts_state.get("present") and not queue_pos:
                     if (
@@ -1700,7 +1813,7 @@ class Engine:
                                 " додавання завершиться автоматично.") if full_page_bot else ""
                         self.log("WARN", source, f"Очікуємо: {reason}; {await diagnostics(before)}.{hint}")
                 try:
-                    await page.wait_for_timeout(80)
+                    await page.wait_for_timeout(60)
                 except Exception as exc:
                     if _browser_was_closed(exc):
                         raise RuntimeError("Браузер закрито під час очікування додавання в кошик") from exc
@@ -1708,7 +1821,6 @@ class Engine:
             return "timeout"
 
         async def safe_reload_product_page() -> None:
-            """Безпечне оновлення картки товару: таймаут проксі не валить завдання, а дозволяє продовжити спробу."""
             try:
                 await page.goto(url, wait_until="domcontentloaded")
             except Exception as exc:
@@ -1716,12 +1828,12 @@ class Engine:
                     raise RuntimeError(f"Браузер закрито під час оновлення {url}") from exc
                 self.log("WARN", source, f"Повільна відповідь під час оновлення сторінки ({_short(exc)}) — продовжуємо…")
                 return
+            await self._dismiss_cookie_banner(page)
             await self._handle_product_challenge(page, account, url)
             if await self._needs_account_login(page):
                 await self._login_on_product_page(page, account, url, task_id=task_id)
 
         async def wait_for_buy_button_or_cart(before_count: int | None):
-            """Миттєво повертає активну кнопку «Купити» (0 мс затримки), або чекає її появи."""
             wait_deadline = time.monotonic() + max(5, cfg.page_timeout_sec)
             while time.monotonic() < wait_deadline:
                 if await self._visible(page, self.CART_BUTTON_ADDED_SELECTOR):
@@ -1739,15 +1851,18 @@ class Engine:
                 return "in_cart", None
             return "missing", None
 
-        async def click_purchase() -> None:
+        async def click_purchase() -> bool:
+            """Повертає True, якщо товар гарантовано в кошику, або False, якщо викинуло на логін і треба повторити."""
             max_attempts = 20
             initial_before: int | None = None
             for recaptcha_attempt in range(1, max_attempts + 1):
                 btn_state, button = await wait_for_buy_button_or_cart(initial_before)
                 if btn_state == "in_cart":
                     self.log("INFO", source, "Товар уже в кошику (підтверджено сайтом)")
-                    return
+                    return True
                 if button is None:
+                    if await self._needs_account_login(page):
+                        return False
                     if recaptcha_attempt < max_attempts:
                         self.log("WARN", source, f"Кнопка «Купити» ще не з'явилася — оновлюємо сторінку ({recaptcha_attempt}/{max_attempts})…")
                         await safe_reload_product_page()
@@ -1762,8 +1877,6 @@ class Engine:
                 before = initial_before
 
                 try:
-                    # Клік лише коли reCAPTCHA сайту готова (інакше токен порожній → «Не вдалося завершити операцію»).
-                    # Якщо вже готова — затримки 0 мс.
                     await page.evaluate(r"""async () => {
                         const start = Date.now();
                         const ready = () => document.readyState === 'complete' &&
@@ -1776,18 +1889,12 @@ class Engine:
                 except Exception:
                     pass
                 try:
-                    # Короткий «людський» рух мишки до кнопки (~60 мс) — reCAPTCHA v3 дає вищий бал за реальний рух,
-                    # а миттєвий клік без руху частіше змушує сайт вимагати галочку Turnstile.
                     box = await button.bounding_box()
                     if box:
                         await page.mouse.move(
-                            box["x"] + box["width"] * random.uniform(0.3, 0.7) - random.randint(60, 160),
-                            box["y"] + box["height"] * random.uniform(0.3, 0.7) + random.randint(30, 90),
-                        )
-                        await page.mouse.move(
                             box["x"] + box["width"] * random.uniform(0.35, 0.65),
                             box["y"] + box["height"] * random.uniform(0.35, 0.65),
-                            steps=5,
+                            steps=3,
                         )
                 except Exception:
                     pass
@@ -1806,30 +1913,24 @@ class Engine:
                 wait_status = await wait_until_added(before, cfg.page_timeout_sec)
                 if wait_status == "added":
                     self.log("INFO", source, "Товар додано в кошик (підтверджено сайтом)")
-                    return
+                    return True
 
                 if wait_status == "reclick_green":
                     if await added(before) or await in_cart_page():
                         self.log("INFO", source, "Товар уже у кошику — повторний клік не потрібен")
-                        return
-                    if recaptcha_attempt % 3 == 0:
-                        # Кожна 3-тя невдача — свіже завантаження сторінки (чиста reCAPTCHA/Turnstile)
-                        await safe_reload_product_page()
-                        if await added(before) or await in_cart_page():
-                            return
-                    else:
-                        await clear_error_banners()
+                        return True
+                    await clear_error_banners()
                     self.log(
                         "INFO",
                         source,
-                        f"Кнопка «Купити» активна — натискаємо повторно ({recaptcha_attempt}/{max_attempts})…",
+                        f"Кнопка «Купити» стала зеленою — натискаємо для додавання в кошик ({recaptcha_attempt}/{max_attempts})…",
                     )
                     continue
 
                 if wait_status == "stuck_reload":
                     if await added(before) or await in_cart_page():
                         self.log("INFO", source, "Товар уже у кошику — оновлення не потрібне")
-                        return
+                        return True
                     self.log(
                         "WARN",
                         source,
@@ -1838,13 +1939,13 @@ class Engine:
                     await safe_reload_product_page()
                     if await added(before) or await in_cart_page():
                         self.log("INFO", source, "Товар уже у кошику після оновлення — повторний клік не потрібен")
-                        return
+                        return True
                     continue
 
                 if wait_status == "retry_error" or await recaptcha_redirect_error():
                     if await added(before) or await in_cart_page():
                         self.log("INFO", source, "Товар уже у кошику — повторний клік не потрібен")
-                        return
+                        return True
                     self.log(
                         "WARN",
                         source,
@@ -1853,13 +1954,13 @@ class Engine:
                     await safe_reload_product_page()
                     if await added(before) or await in_cart_page():
                         self.log("INFO", source, "Товар уже у кошику — повторний клік не потрібен")
-                        return
+                        return True
                     continue
                 break
 
             if await in_cart_page():
                 self.log("INFO", source, "Товар знайдено у кошику (відповідь сайту) — повторний клік не потрібен")
-                return
+                return True
 
             retry = await self._first_visible_enabled(page, cfg.add_to_cart_selector, 2000)
             if retry is not None and not await added(before) and not await pending_state() \
@@ -1868,28 +1969,35 @@ class Engine:
                 await retry.click()
                 if (await wait_until_added(before, cfg.page_timeout_sec)) == "added":
                     self.log("INFO", source, "Товар додано в кошик (підтверджено сайтом)")
-                    return
+                    return True
 
             details = await diagnostics(before)
             if await in_cart_page():
                 self.log("INFO", source, "Товар знайдено на сторінці кошика — додано")
-                return
-            if await self._login_form_available(page):
-                return
+                return True
+            if await self._needs_account_login(page):
+                return False
             debug_dir = await save_debug()
             raise RuntimeError(
                 f"Не вдалося підтвердити додавання в кошик на {page.url}; {details}"
                 + (f"; знімок екрана й розмітка збережені в {debug_dir}" if debug_dir else "")
             )
 
-        await click_purchase()
+        # ФІКС (Пункт 7): Жодних фальшивих спрацьовувань чекауту, якщо сайт викинув на форму входу!
+        added_confirmed = False
+        for auth_cycle in range(3):
+            if await click_purchase():
+                added_confirmed = True
+                break
+            if auth_cycle < 2 and await self._needs_account_login(page):
+                self._task_status(task_id, TaskStatus.LOGIN, f"Сайт вимагає вхід для {account.email}…")
+                await self._ensure_logged_in(page, account, task_id=task_id)
+                await page.goto(url, wait_until="domcontentloaded")
+                await self._dismiss_cookie_banner(page)
+                await self._handle_product_challenge(page, account, url)
 
-        if await self._login_form_available(page):
-            self._task_status(task_id, TaskStatus.LOGIN, f"Сайт вимагає вхід для {account.email}…")
-            await self._ensure_logged_in(page, account)
-            await page.goto(url, wait_until="domcontentloaded")
-            await self._handle_product_challenge(page, account, url)
-            await click_purchase()
+        if not added_confirmed:
+            raise RuntimeError(f"Не вдалося додати товар у кошик після повторного входу на {page.url}")
 
         self.db.add_cart_item(account.id, task_id, url, title, price)
         self.events.data_changed("cart")
@@ -1967,14 +2075,25 @@ class Engine:
     async def _sync_orders(self, account_ids: list[int] | None) -> None:
         from .orders_parser import apply_orders, fetch_user_orders
 
-        accounts = [a for a in self.db.accounts() if account_ids is None or a.id in account_ids]
+        # ФІКС (Пункти 1 і 6): Не чіпаємо акаунти, на яких прямо зараз крутяться активні завдання!
+        busy_ids = self.busy_account_ids()
+        accounts = [
+            a for a in self.db.accounts()
+            if (account_ids is None or a.id in account_ids) and a.id not in busy_ids
+        ]
         if not accounts:
-            self.log("WARN", "orders", "Немає акаунтів для збору замовлень")
+            if busy_ids:
+                self.log("INFO", "orders", "Збір замовлень відкладено: усі вибрані акаунти зараз зайняті в активних завданнях")
+            else:
+                self.log("WARN", "orders", "Немає акаунтів для збору замовлень")
+            return
         if self._orders_lock.locked():
             self.log("INFO", "orders", "Збір замовлень вже йде — чекаємо, поки завершиться")
         async with self._orders_lock:
             total_new = total_changed = 0
             for account in accounts:
+                if account.id in self.busy_account_ids():
+                    continue
                 source = f"account#{account.id}"
                 proxy = self.db.proxy(account.proxy_id) if account.proxy_id else None
                 is_adspower = bool(account and getattr(account, "adspower_id", None))
@@ -2020,14 +2139,17 @@ class Engine:
         self.events.data_changed("orders")
 
     async def _orders_sync_loop(self) -> None:
-        """Автооновлення за розкладом (orders_sync_minutes > 0). Лише акаунти зі збереженою сесією."""
+        """Автооновлення за розкладом (orders_sync_minutes > 0). Лише вільні акаунти зі збереженою сесією."""
         while True:
             minutes = self.config.orders_sync_minutes
             await asyncio.sleep(max(60, minutes * 60) if minutes > 0 else 60)
             if self.config.orders_sync_minutes <= 0:
                 continue
-            ids = [a.id for a in self.db.accounts()
-                   if a.status == AccountStatus.ACTIVE.value and self.state_path(a.id).exists()]
+            busy_ids = self.busy_account_ids()
+            ids = [
+                a.id for a in self.db.accounts()
+                if a.status == AccountStatus.ACTIVE.value and self.state_path(a.id).exists() and a.id not in busy_ids
+            ]
             if ids:
                 try:
                     await self._sync_orders(ids)
@@ -2037,7 +2159,6 @@ class Engine:
     # ------------------------------------------------------------- Telegram
 
     def _telegram_target(self) -> tuple[str, str] | None:
-        """(токен, chat id), якщо сповіщення увімкнено й налаштовано; інакше None."""
         cfg = self.config
         if not (cfg.telegram_enabled and cfg.telegram_chat_id):
             return None
@@ -2065,7 +2186,6 @@ class Engine:
         self.log("INFO" if ok else "WARN", "telegram", f"№{number}: {detail}")
 
     def send_test_notification(self, chat_id: str, token: str | None) -> concurrent.futures.Future:
-        """Тестове повідомлення з кнопки в налаштуваннях. token=None — взяти збережений у Keychain."""
         from .notifier import send_telegram_text
 
         async def run() -> tuple[bool, str]:
